@@ -6,8 +6,7 @@ Foco em emuladores (Drastic, melonDS, DeSmuME); não foi otimizada para hardware
 ## Status honesto
 - **Escrito e testado só a nível de lógica** (no PC, com uma "libnds falsa" + AddressSanitizer: 6000 frames
   simulando andar, atacar, subir de nível, entrar/sair de dungeon, ciclo dia/noite — sem crash e sem estouro de coordenadas).
-- **Não foi compilado com o devkitARM nem rodado em emulador de DS**: o ambiente onde fiz isso não tinha o toolchain
-  nem internet. A **ROM `.nds` precisa ser compilada por você** (instruções abaixo; o jeito mais fácil é o GitHub Actions).
+- **A **ROM `.nds` precisa ser compilada por você** (instruções abaixo; o jeito mais fácil é o GitHub Actions).
 - Pode haver pequenos erros de compilação/API na 1ª tentativa (a libnds mudou na versão 2.x). Se der erro, me mande a mensagem.
 
 ## O que tem
