@@ -22,6 +22,7 @@ jobs:
         shell: bash
         run: |
           export DEVKITPRO=/opt/devkitpro
+          sed -i 's/-DARM9/-DARM9 -D__NDS__/g' Makefile
           make
 
       - name: Disponibilizar ROM
