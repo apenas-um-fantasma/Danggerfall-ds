@@ -866,10 +866,10 @@ int main(void) {
 #endif
         if (msgT > 0) msgT--;
         switch (gstate) {
-        case ST_TITLE:
-            title_update();
-            title_render();
-            break;
+case ST_TITLE:
+    title_update();
+    // title_render(); // desativado para teste
+    break;
         case ST_PLAY:
             if (keysDown() & KEY_START) { paused ^= 1; consoleClear(); if (paused) { put(8, "       -- PAUSA --"); put(10, "START: continuar"); put(12, "SELECT: voltar ao titulo"); } }
             if (paused) {
