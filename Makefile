@@ -37,7 +37,7 @@ endif
 
 CFLAGS  := -g -Wall -O2 $(ARCH) -fomit-frame-pointer -ffunction-sections -fdata-sections -std=gnu11 -DARM9 $(INCLUDE)
 LDFLAGS := $(SPECS) -g $(ARCH) -Wl,--gc-sections -Wl,-Map,$(BUILD)/$(TARGET).map $(LIBDIRS)
-LIBS    := -lnds9
+LIBS    := -lnds9 -lcalico_ds9
 
 all: $(TARGET).nds
 
