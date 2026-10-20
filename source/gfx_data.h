@@ -1,0 +1,50 @@
+// GERADO por tools/gen_assets.py
+#ifndef GFX_DATA_H
+#define GFX_DATA_H
+typedef struct { const unsigned short* data; int w, h; int wrap; } TexDef;
+enum {
+    TEX_GRASS,
+    TEX_GRASS2,
+    TEX_DIRT,
+    TEX_ROCK,
+    TEX_SAND,
+    TEX_SNOW,
+    TEX_COBBLE,
+    TEX_WATER,
+    TEX_WALL,
+    TEX_ROOF,
+    TEX_DOOR,
+    TEX_DG_WALL,
+    TEX_DG_FLOOR,
+    TEX_DG_CEIL,
+    TEX_DG_DOOR,
+    TEX_TREE_PINE,
+    TEX_TREE_OAK,
+    TEX_TREE_DEAD,
+    TEX_HOUSE_FAR,
+    TEX_DUNGEON_FAR,
+    TEX_EXIT,
+    TEX_GOBLIN0,
+    TEX_GOBLIN1,
+    TEX_GOBLIN2,
+    TEX_GOBLIN3,
+    TEX_SKEL0,
+    TEX_SKEL1,
+    TEX_SKEL2,
+    TEX_SKEL3,
+    TEX_NPC0,
+    TEX_NPC1,
+    TEX_CHEST0,
+    TEX_CHEST1,
+    TEX_SWORD0,
+    TEX_SWORD1,
+    TEX_SWORD2,
+    TEX_SWORD3,
+    TEX_FIST0,
+    TEX_FIST1,
+    TEX_FIST2,
+    TEX_LOGO,
+    TEX_COUNT
+};
+extern const TexDef gTexDefs[TEX_COUNT];
+#endif
