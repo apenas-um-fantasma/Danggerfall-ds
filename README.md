@@ -6,8 +6,6 @@ Foco em emuladores (Drastic, melonDS, DeSmuME); não foi otimizada para hardware
 ## Status honesto
 - **Escrito e testado só a nível de lógica** (no PC, com uma "libnds falsa" + AddressSanitizer: 6000 frames
   simulando andar, atacar, subir de nível, entrar/sair de dungeon, ciclo dia/noite — sem crash e sem estouro de coordenadas).
-- **A **ROM `.nds` precisa ser compilada por você** (instruções abaixo; o jeito mais fácil é o GitHub Actions).
-- Pode haver pequenos erros de compilação/API na 1ª tentativa (a libnds mudou na versão 2.x). Se der erro, me mande a mensagem.
 
 ## O que tem
 - **Mundo procedural infinito** com Ruído Perlin (ponto fixo): colinas, lagos, montanhas com neve, só ao redor do jogador (raio de 13 tiles, com dissolução suave no horizonte).
@@ -29,26 +27,11 @@ Foco em emuladores (Drastic, melonDS, DeSmuME); não foi otimizada para hardware
 | X | trocar espada ⇄ punhos |
 | Y | falar / abrir baú / entrar e sair da dungeon |
 | SELECT | beber poção |
-| START | pausa (SELECT na pausa volta ao título) |
-
-## Como gerar a ROM
-### A) Pelo celular/navegador (GitHub Actions) — sem instalar nada
-1. Crie um repositório no GitHub e suba **todo o conteúdo desta pasta** (inclusive `.github/workflows/build.yml`).
-2. Aba **Actions → "Compilar ROM (NDS)" → Run workflow** (ou o push já dispara).
-3. Quando terminar, abra a execução e baixe o artefato **daggerfall-ds-rom** (contém o `.nds`).
-4. Abra o `.nds` no Drastic DS.
-
-### B) No PC
-1. Instale o devkitPro (https://devkitpro.org) e o grupo `nds-dev` (`dkp-pacman -S nds-dev`).
-2. `export DEVKITPRO=/opt/devkitpro` (no Windows use o "MSYS2" do devkitPro) e rode `make`.
-3. Sai `daggerfall_ds.nds`. Se o Makefile falhar na sua versão da libnds, copie o `Makefile` de
-   `$DEVKITPRO/examples/nds/templates/arm9/` para esta pasta e rode `make` de novo (ele já compila `source/*.c`).
-
-### C) Docker
-`docker run --rm -v "$PWD":/work -w /work devkitpro/devkitarm sh -c "dkp-pacman -Sy --noconfirm nds-dev && make"`
+| START | pausa (apertar SELECT na pausa volta ao título) |
+| Segunda tela | Permite controlar a câmera |
 
 ## Estrutura
-- `source/main.c` — loop, renderização 3D, combate, menus, HUD.
+- `source/main.c` — loop, renderização 3D, combate, menus, HUD, controle da segunda tela.
 - `source/terrain.c/.h` — Perlin, altura do mundo (com cache), vilas, árvores. **C puro**, testável no PC.
 - `source/dungeon.c/.h` — gerador de dungeons.
 - `source/gfx_data.c/.h` — **gerado** por `tools/gen_assets.py` (texturas A1RGB5 prontas para `glTexImage2D`).
@@ -62,4 +45,4 @@ Foco em emuladores (Drastic, melonDS, DeSmuME); não foi otimizada para hardware
 - Os sprites foram **desenhados por código** (sem arquivos externos), então não há licença a respeitar.
 
 ## Limitações conhecidas
-Sem save, sem som, sem inventário de verdade, câmera sem olhar para cima/baixo, minimapa em texto.
+Sem save, sem som, sem inventário de verdade, minimapa em texto, todas as informações do player(HP, outro, xp, etc) em texto na segunda tela.
