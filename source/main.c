@@ -6,6 +6,12 @@
 //  - Tela de baixo: menu, HUD e minimapa em texto
 // ============================================================================
 #include <nds.h>
+#if defined(__has_include)
+#  if __has_include(<nds/arm9/exceptions.h>)
+#    include <nds/arm9/exceptions.h>
+#    define HAVE_EXC_HANDLER 1
+#  endif
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -178,7 +184,12 @@ static void build_near_lists(void) {
         }
 }
 
+static int alphaTab[R_VIEW * R_VIEW + 1], alphaTabOk = 0;
 static int fade_alpha(int d2) {
+    if (d2 >= 0 && d2 <= R_VIEW * R_VIEW) {
+        if (!alphaTabOk) { for (int i = 0; i <= R_VIEW * R_VIEW; i++) { int dd = isqrt((unsigned)(i << 8)); int lim = (R_VIEW - FADE_TILES) * 16; alphaTab[i] = dd <= lim ? 31 : clampi(31 - ((dd - lim) * 28) / (FADE_TILES * 16), 3, 31); } alphaTabOk = 1; }
+        return alphaTab[d2];
+    }
     int dd = isqrt((unsigned)(d2 << 8));            // distancia * 16
     int lim = (R_VIEW - FADE_TILES) * 16;
     if (dd <= lim) return 31;
@@ -197,6 +208,7 @@ static int feat_dist16(int tx, int tz, int type) {   // distancia*16 ate a featu
     for (int i = 0; i < nnearF; i++) {
         if (nearF[i].type != type) continue;
         int dx = tx - nearF[i].cx, dz = tz - nearF[i].cz;
+        if (dx > 10 || dx < -10 || dz > 10 || dz < -10) continue;
         int d = isqrt((unsigned)((dx * dx + dz * dz) << 8));
         if (d < best) best = d;
     }
@@ -800,7 +812,7 @@ static void title_update(void) {
         if (row >= 8 && row <= 10) pick = 0; else if (row >= 11 && row <= 12) pick = 1; else if (row >= 13 && row <= 15) pick = 2;
         if (pick >= 0) menuSel = pick;
     }
-    title_draw_menu();
+    if (down & (KEY_UP | KEY_DOWN | KEY_TOUCH)) title_draw_menu();
     if (pick == 0) new_game();
     else if (pick == 1) { helpPage = 1; consoleClear(); title_draw_menu(); }
     else if (pick == 2) { helpPage = 2; consoleClear(); title_draw_menu(); }
@@ -809,7 +821,7 @@ static void title_update(void) {
 static void title_render(void) {
     static int tt = 0; tt++;
     // camera orbitando devagar sobre o terreno
-    int cx, cz; world_find_start(&cx, &cz);
+    static int cx, cz, have = 0; if (!have) { world_find_start(&cx, &cz); have = 1; }
     P.x = cx + ((sinLerp((tt * 6) & 0x7FFF) * U(3)) >> 12); P.z = cz - ((cosLerp((tt * 6) & 0x7FFF) * U(3)) >> 12);
     P.yaw = (tt * 20) & 0x7FFF; P.ground = world_height_at(P.x, P.z); P.y = P.ground + U(1.5);
     inDungeon = 0; dayf = 4096; ambR = ambG = ambB = 256; frameNo++;
@@ -823,6 +835,7 @@ static void title_render(void) {
 #ifdef HOST_TEST
 // gancho usado apenas pelo teste no PC (tools/host_test.sh): teleporta p/ uma dungeon e volta
 static void host_test_hook(void) {
+    { extern unsigned long g_noise_calls; static unsigned long last; if (frameNo <= 8 || frameNo % 500 == 0) printf("  [f=%d] noise2/frame=%lu\n", frameNo, g_noise_calls - last); last = g_noise_calls; }
     if (frameNo % 500 == 0) { int na = 0; for (int i = 0; i < MAX_EN; i++) na += en[i].active; printf("f=%d state=%d dg=%d pos=(%.1f,%.1f) h=%.2f hp=%d lv=%d kills=%d gold=%d enemies=%d day=%d\n", frameNo, gstate, inDungeon, P.x / 4096.0, P.z / 4096.0, P.ground / 4096.0, P.hp, P.level, P.kills, P.gold, na, dayf); }
     if (gstate != ST_PLAY) return;
     if (frameNo == 400) {
@@ -845,15 +858,25 @@ int main(void) {
     consoleInit(NULL, 0, BgType_Text4bpp, BgSize_T_256x256, 15, 0, false, true);
     BG_PALETTE_SUB[0] = RGB15(2, 3, 8);
     BG_PALETTE_SUB[255] = RGB15(31, 31, 28);
+#ifdef HAVE_EXC_HANDLER
+    defaultExceptionHandler();      // em caso de crash mostra uma tela com o erro
+#endif
+    put(0, "Daggerfall DS - iniciando...");
+    put(1, "1/4 video ok");
 
     glInit();
+    put(2, "2/4 3D ok");
     glEnable(GL_TEXTURE_2D | GL_ANTIALIAS | GL_BLEND);
     glClearColor(10, 16, 26, 31);
     glClearPolyID(63);
     glClearDepth(0x7FFF);
     glViewport(0, 0, 255, 191);
     load_textures();
+    put(3, "3/4 texturas ok");
     world_init(SEED);
+    put(4, "4/4 mundo ok");
+    for (int i = 0; i < 20; i++) swiWaitForVBlank();    // mostra as etapas por um instante
+    consoleClear();
     rngs ^= (unsigned)(SEED * 7919u);
 
     title_draw_menu();
@@ -866,10 +889,10 @@ int main(void) {
 #endif
         if (msgT > 0) msgT--;
         switch (gstate) {
-case ST_TITLE:
-    title_update();
-    // title_render(); // desativado para teste
-    break;
+        case ST_TITLE:
+            title_update();
+            title_render();
+            break;
         case ST_PLAY:
             if (keysDown() & KEY_START) { paused ^= 1; consoleClear(); if (paused) { put(8, "       -- PAUSA --"); put(10, "START: continuar"); put(12, "SELECT: voltar ao titulo"); } }
             if (paused) {

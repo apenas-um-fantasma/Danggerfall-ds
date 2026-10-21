@@ -35,7 +35,9 @@ static int grad(int h, int x, int z) {
         case 6: return  z;      default: return -z;
     }
 }
-static int noise2(int x, int z) {              // x,z em 4.12; resultado ~[-4096,4096]
+unsigned long g_noise_calls = 0;
+static int noise2(int x, int z) {
+    g_noise_calls++;              // x,z em 4.12; resultado ~[-4096,4096]
     int xi = (x >> 12) & 255, zi = (z >> 12) & 255;
     int xf = x & 4095, zf = z & 4095;
     int u = fade(xf), v = fade(zf);
@@ -85,8 +87,9 @@ static int raw_height(int tx, int tz) {
 }
 
 // ---------------------------------------------------------------- features
+static int start_valid = 0, start_x, start_z;
 typedef struct { int valid, rx, rz; Feature f; } FCache;
-static FCache fcache[64];
+static FCache fcache[256];            // indexado por (rx&15, rz&15): vizinhos 3x3 nunca colidem
 
 static Feature compute_feature(int rx, int rz) {
     Feature f; memset(&f, 0, sizeof f);
@@ -110,7 +113,7 @@ static Feature compute_feature(int rx, int rz) {
     return f;
 }
 Feature world_feature(int rx, int rz) {
-    FCache* c = &fcache[(hash3(rx, rz, 5)) & 63];
+    FCache* c = &fcache[(rx & 15) + (rz & 15) * 16];
     if (!c->valid || c->rx != rx || c->rz != rz) { c->valid = 1; c->rx = rx; c->rz = rz; c->f = compute_feature(rx, rz); }
     return c->f;
 }
@@ -119,7 +122,8 @@ Feature world_feature(int rx, int rz) {
 #define CS 128
 static int cacheH[CS * CS], cacheX[CS * CS], cacheZ[CS * CS];
 static unsigned char cacheV[CS * CS];
-void terrain_cache_clear(void) { memset(cacheV, 0, sizeof cacheV); memset(fcache, 0, sizeof fcache); }
+static void tree_cache_clear(void);
+void terrain_cache_clear(void) { memset(cacheV, 0, sizeof cacheV); memset(fcache, 0, sizeof fcache); tree_cache_clear(); start_valid = 0; }
 
 static int smooth01(int t) { t = clampi(t, 0, 4096); return ((t * t >> 12) * (3 * 4096 - 2 * t)) >> 12; }
 
@@ -194,7 +198,19 @@ static int near_feature_dist(int tx, int tz, int type_mask) {      // distancia 
         }
     return best;
 }
+static int tc_x[64 * 64], tc_z[64 * 64]; static unsigned char tc_v[64 * 64]; static TreeInfo tc_t[64 * 64];
+static int tree_at_raw(int tx, int tz, TreeInfo* out);
 int tree_at(int tx, int tz, TreeInfo* out) {
+    int i = (tx & 63) + (tz & 63) * 64;
+    if (!tc_v[i] || tc_x[i] != tx || tc_z[i] != tz) {
+        TreeInfo ti; int r = tree_at_raw(tx, tz, &ti);
+        tc_x[i] = tx; tc_z[i] = tz; tc_t[i] = ti; tc_t[i].type = r ? ti.type : 0; tc_v[i] = 1;
+    }
+    if (!tc_t[i].type) return 0;
+    *out = tc_t[i]; return 1;
+}
+static void tree_cache_clear(void) { memset(tc_v, 0, sizeof tc_v); }
+static int tree_at_raw(int tx, int tz, TreeInfo* out) {
     unsigned h = hash3(tx, tz, world_seed + 77u);
     int fm = NGAIN(fbm((tx << 6) + 12345, (tz << 6) + 54321, 2));
     int dens = 2 + (fm > 0 ? (fm * 30) / 4096 : 0);                 // % por tile
@@ -216,7 +232,12 @@ int tree_at(int tx, int tz, TreeInfo* out) {
     return 1;
 }
 
+static void find_start_raw(int* fx, int* fz);
 void world_find_start(int* fx, int* fz) {
+    if (!start_valid) { find_start_raw(&start_x, &start_z); start_valid = 1; }
+    *fx = start_x; *fz = start_z;
+}
+static void find_start_raw(int* fx, int* fz) {
     for (int ring = 0; ring <= 3; ring++)
         for (int rz = -ring; rz <= ring; rz++)
             for (int rx = -ring; rx <= ring; rx++) {
