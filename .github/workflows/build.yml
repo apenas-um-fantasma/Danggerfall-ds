@@ -9,32 +9,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Instalar libnds, ndstool e exemplos oficiais
-        run: dkp-pacman -Syu --noconfirm nds-dev nds-examples
-
-      - name: Mostrar o que foi instalado (para diagnostico)
+      - name: Tentar atualizar pacotes (opcional)
         run: |
+          dkp-pacman -Sy --noconfirm nds-dev nds-examples || echo "Sem acesso ao servidor de pacotes; usando o que ja vem na imagem"
+
+      - name: Diagnostico
+        run: |
+          which ndstool || echo "ndstool NAO encontrado"
           ls /opt/devkitpro || true
-          ls /opt/devkitpro/libnds || true
-          ls /opt/devkitpro/calico || true
-          find /opt/devkitpro/examples/nds -maxdepth 3 -name Makefile | head -40
+          ls /opt/devkitpro/calico/bin || true
+          find /opt/devkitpro/examples/nds -maxdepth 3 -name Makefile 2>/dev/null | head -20
 
-      - name: Compilar com o Makefile OFICIAL do devkitPro (garante ARM7/specs corretos)
+      - name: Compilar
         run: |
-          set -ex
+          set -x
           export DEVKITPRO=/opt/devkitpro
           export DEVKITARM=/opt/devkitpro/devkitARM
-          T=$(find /opt/devkitpro/examples/nds -maxdepth 3 -name Makefile -path '*hello_world*' | head -1)
-          if [ -z "$T" ]; then T=$(find /opt/devkitpro/examples/nds -maxdepth 3 -name Makefile -path '*templates*' | grep -i arm9 | head -1); fi
-          echo "Usando template: $T"
-          test -n "$T"
           cp Makefile Makefile.project
-          cp "$T" ./Makefile
-          sed -i 's/^GRAPHICS[[:space:]]*:=.*/GRAPHICS :=/' Makefile
-          sed -i 's/^TARGET[[:space:]]*:=.*/TARGET := daggerfall_ds/' Makefile
-          make clean || true
-          if ! make; then
-            echo "::warning::Template oficial falhou; usando o Makefile do projeto (com -lcalico_ds9)"
+          T=$(find /opt/devkitpro/examples/nds -maxdepth 3 -name Makefile -path '*hello_world*' 2>/dev/null | head -1)
+          OK=0
+          if [ -n "$T" ]; then
+            echo "Tentando template oficial: $T"
+            cp "$T" ./Makefile
+            sed -i 's/^GRAPHICS[[:space:]]*:=.*/GRAPHICS :=/' Makefile
+            sed -i 's/^TARGET[[:space:]]*:=.*/TARGET := daggerfall_ds/' Makefile
+            make clean || true
+            if make; then OK=1; fi
+          fi
+          if [ "$OK" -eq 0 ]; then
+            echo "Usando o Makefile do projeto"
             cp Makefile.project Makefile
             make clean || true
             make
