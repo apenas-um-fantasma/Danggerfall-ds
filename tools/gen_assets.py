@@ -2,19 +2,19 @@
 """
 Gera TODAS as texturas e sprites do jogo de forma procedural (sem arquivos externos,
 sem licencas). Saidas:
-  gfx/*.png                 -> imagens editaveis
-  gfx/_preview.png          -> folha de contato para conferir visualmente
+  art/*.png                 -> imagens editaveis
+  art/_preview.png          -> folha de contato para conferir visualmente
   source/gfx_data.c / .h    -> arrays A1RGB5 prontos para glTexImage2D (GL_RGBA)
 
 Uso:  python3 tools/gen_assets.py        (requer Pillow e numpy)
-Para trocar uma arte: edite/substitua o PNG em gfx/ e rode  python3 tools/gen_assets.py --from-png
+Para trocar uma arte: edite/substitua o PNG em art/ e rode  python3 tools/gen_assets.py --from-png
 """
 import math, os, sys
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-GFX = os.path.join(ROOT, "gfx")
+GFX = os.path.join(ROOT, "art")
 SRC = os.path.join(ROOT, "source")
 os.makedirs(GFX, exist_ok=True)
 S = 4  # supersampling dos sprites
