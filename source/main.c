@@ -20,11 +20,11 @@
 #include "gfx_data.h"
 
 // ------------------------------------------------------------------ configuracao (ajuste aqui)
-#define R_MAX           30          // maximo da distancia de renderizacao (tiles)
+#define R_MAX           20// maximo da distancia de renderizacao (tiles)
 #define GEO_SHIFT       2           // vertices guardados em escala 1/4 (cabe ate 30 tiles no v16 do DS)
 #define PITCH_SIGN      1           // se olhar para cima/baixo sair invertido, troque para -1
 #define PITCH_MAX       7200        // limite de inclinacao da camera (~40 graus)
-static int gRView = 22;             // distancia de renderizacao ATUAL (muda em Configuracoes)
+static int gRView = 16;             // distancia de renderizacao ATUAL (muda em Configuracoes)
 #define R_VIEW          gRView
 #define FADE_TILES      (R_VIEW / 4)  // largura do anel que "dissolve" no ceu
 #define HOUSE_3D_DIST   U(8.0)      // abaixo disso a casa vira 3D; acima disso e sprite 2D
