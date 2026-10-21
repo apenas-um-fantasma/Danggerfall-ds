@@ -52,16 +52,18 @@ enum {
     TEX_COUNT
 };
 extern const TexDef gTexDefs[TEX_COUNT];
+extern const unsigned gfx_stamp;
+#define GFX_STAMP 0xFD142661u
 // cores medias dos biomas (calculadas das texturas de chao)
-#define TINT_GRASS_R 80
-#define TINT_GRASS_G 119
-#define TINT_GRASS_B 62
-#define TINT_GRASS2_R 115
-#define TINT_GRASS2_G 122
-#define TINT_GRASS2_B 51
-#define TINT_DIRT_R 142
-#define TINT_DIRT_G 93
-#define TINT_DIRT_B 52
+#define TINT_GRASS_R 72
+#define TINT_GRASS_G 107
+#define TINT_GRASS_B 56
+#define TINT_GRASS2_R 104
+#define TINT_GRASS2_G 110
+#define TINT_GRASS2_B 46
+#define TINT_DIRT_R 128
+#define TINT_DIRT_G 84
+#define TINT_DIRT_B 47
 #define TINT_SAND_R 255
 #define TINT_SAND_G 191
 #define TINT_SAND_B 97

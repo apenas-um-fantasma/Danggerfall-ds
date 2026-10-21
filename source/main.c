@@ -125,13 +125,15 @@ static void say(const char* s) { strncpy(msg, s, 119); msg[119] = 0; msgT = 220;
 // ------------------------------------------------------------------ texturas
 static int texId[TEX_COUNT];
 static int tsz(int n) { int s = 0, v = 8; while (v < n) { v <<= 1; s++; } return s; }
+static int texFailed = 0, texFirstFail = -1;
 static void load_textures(void) {
     for (int i = 0; i < TEX_COUNT; i++) {
         const TexDef* t = &gTexDefs[i];
         glGenTextures(1, &texId[i]);
         glBindTexture(0, texId[i]);
-        glTexImage2D(0, 0, GL_RGBA, tsz(t->w), tsz(t->h), 0,
-                     TEXGEN_TEXCOORD | (t->wrap ? (GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T) : 0), t->data);
+        int ok = glTexImage2D(0, 0, GL_RGBA, tsz(t->w), tsz(t->h), 0,
+                              TEXGEN_TEXCOORD | (t->wrap ? (GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T) : 0), t->data);
+        if (!ok) { texFailed++; if (texFirstFail < 0) texFirstFail = i; }
     }
 }
 #define TC(u, v) glTexCoord2t16(inttot16(u), inttot16(v))
@@ -1142,11 +1144,17 @@ int main(void) {
     glClearPolyID(63);
     glClearDepth(0x7FFF);
     glViewport(0, 0, 255, 191);
+    if (gfx_stamp != GFX_STAMP) {                       // .c e .h de versoes diferentes -> texturas erradas
+        put(3, "ERRO: gfx_data.c e gfx_data.h");
+        put(4, "nao combinam! Suba os DOIS");
+        put(5, "arquivos da mesma versao.");
+        while (1) wait_vbl();
+    }
     load_textures();
-    put(3, "3/4 texturas ok");
+    { char tb[40]; if (texFailed) snprintf(tb, sizeof tb, "3/4 texturas: %d FALHARAM (1a=%d)", texFailed, texFirstFail); else snprintf(tb, sizeof tb, "3/4 texturas ok (%d)", TEX_COUNT); put(3, tb); }
     world_init(SEED);
     put(4, "4/4 mundo ok");
-    for (int i = 0; i < 20; i++) wait_vbl();    // mostra as etapas por um instante
+    for (int i = 0; i < (texFailed ? 240 : 20); i++) wait_vbl();    // mostra as etapas por um instante
     consoleClear();
     rngs ^= (unsigned)(SEED * 7919u);
 
