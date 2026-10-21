@@ -1,4 +1,4 @@
-# Daggerfall DS (teste técnico) — homebrew 3D para Nintendo DS
+# Daggerfall DS (teste técnico) — homebrew para Nintendo DS
 
 Mini-versão inspirada em *The Elder Scrolls II: Daggerfall*, escrita em C com **libnds** (devkitARM).
 Foco em emuladores (Drastic, melonDS, DeSmuME); não foi otimizada para hardware real.
