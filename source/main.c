@@ -20,8 +20,16 @@
 #include "gfx_data.h"
 
 // ------------------------------------------------------------------ configuracao (ajuste aqui)
-#define R_VIEW          13          // raio de renderizacao do terreno, em tiles (max 14 por causa do v16)
-#define FADE_TILES      4           // largura do anel que "dissolve" no ceu
+#define R_VIEW          22          // DISTANCIA DE RENDERIZACAO em tiles (13 = antigo, 22 = padrao, max 30)
+#define FADE_TILES      (R_VIEW / 4)  // largura do anel que "dissolve" no ceu
+#if R_VIEW > 30
+#  error "R_VIEW maximo = 30"
+#endif
+#if R_VIEW > 13
+#  define GEO_SHIFT 2               // vertices guardados em escala 1/4 (cabe mais mundo no v16 do DS)
+#else
+#  define GEO_SHIFT 1
+#endif
 #define HOUSE_3D_DIST   U(8.0)      // abaixo disso a casa vira 3D; acima disso e sprite 2D
 #define DG_3D_DIST      U(9.0)
 #define EYE             U(0.8)
@@ -107,7 +115,23 @@ static void load_textures(void) {
 // ------------------------------------------------------------------ camera / vertices
 static int gox, goy, goz;               // origem da vista (f32): vertices sao relativos a ela
 static int gRX, gRZ, gFX, gFZ;          // vetor "direita" e "frente" (4.12)
-static inline short v16c(int f) { int v = f >> 1; if (v > 32767) v = 32767; if (v < -32767) v = -32767; return (short)v; }
+#ifdef HOST_TEST
+static int g_clamps = 0;
+#endif
+static inline short v16c(int f) {
+    int v = f >> GEO_SHIFT;
+    if (v > 32767) { v = 32767;
+#ifdef HOST_TEST
+        g_clamps++;
+#endif
+    }
+    if (v < -32767) { v = -32767;
+#ifdef HOST_TEST
+        g_clamps++;
+#endif
+    }
+    return (short)v;
+}
 static inline void vtx(int wx, int wy, int wz) { glVertex3v16(v16c(wx - gox), v16c(wy - goy), v16c(wz - goz)); }
 
 static void setup_camera(void) {
@@ -116,11 +140,11 @@ static void setup_camera(void) {
     gRX = cosLerp(yaw); gRZ = sinLerp(yaw);
     gox = (P.x >> 12) << 12; goy = (P.y >> 12) << 12; goz = (P.z >> 12) << 12;
     glMatrixMode(GL_PROJECTION); glLoadIdentity();
-    gluPerspective(70, 256.0 / 192.0, 0.2, 40);
+    gluPerspective(70, 256.0 / 192.0, 0.25, R_VIEW + 8);
     glMatrixMode(GL_MODELVIEW); glLoadIdentity();
     glRotateYi(VIEW_ROT_SIGN * yaw);
     glTranslate3f32(-(P.x - gox), -(P.y - goy), -(P.z - goz));
-    glScalef32(inttof32(2), inttof32(2), inttof32(2));
+    glScalef32(inttof32(1 << GEO_SHIFT), inttof32(1 << GEO_SHIFT), inttof32(1 << GEO_SHIFT));
 }
 
 static unsigned short lit(int sh, int tint) {          // sh,tint 0..256 -> cor 15 bits
@@ -129,6 +153,10 @@ static unsigned short lit(int sh, int tint) {          // sh,tint 0..256 -> cor 
     return RGB15(mini(r, 31), mini(g, 31), mini(b, 31));
 }
 static unsigned short litc(int sh) { return lit(sh, 256); }
+static unsigned short litrgb(int sh, int tr, int tg, int tb) {       // sombreamento * cor do bioma * luz ambiente
+    int r = (31 * sh * tr * ambR) >> 24, g = (31 * sh * tg * ambG) >> 24, b = (31 * sh * tb * ambB) >> 24;
+    return RGB15(mini(r, 31), mini(g, 31), mini(b, 31));
+}
 
 static void update_daylight(void) {
     if (inDungeon) { dayf = 0; return; }
@@ -175,7 +203,7 @@ static void quad4(int tex, int alpha, int pid,
 static Feature nearF[9]; static int nnearF;
 static House   nearH[24]; static int nearHx[24], nearHz[24], nnearH;
 static int     npcX[12], npcZ[12], npcVar[12], nnpc;
-static int     visTx[900], visTz[900], visD2[900], nvis;
+static int     visTx[2000], visTz[2000], visD2[2000], nvis, g_nwater;
 
 static void build_near_lists(void) {
     nnearF = nnearH = nnpc = 0;
@@ -229,7 +257,9 @@ static int pick_tex(int tx, int tz, int h00, int h10, int h01, int h11, unsigned
     int avg = (h00 + h10 + h01 + h11) >> 2;
     int mn = mini(mini(h00, h10), mini(h01, h11)), mx = maxi(maxi(h00, h10), maxi(h01, h11));
     int slope = mx - mn;
-    int dv = feat_dist16(tx, tz, FEAT_VILLAGE);
+    avg += (((int)((hv >> 8) & 255)) - 128) * U(1.6) / 128;         // limiares tremidos -> fronteiras em faixa, nao em linha
+    slope += (((int)((hv >> 16) & 255)) - 128) * U(0.45) / 128; if (slope < 0) slope = 0;
+    int dv = feat_dist16(tx, tz, FEAT_VILLAGE) + (int)((hv >> 24) & 31) - 16;
     if (dv < 3 * 16) return TEX_COBBLE;
     if (dv < 9 * 16 && (hv % 5) < 2) return TEX_DIRT;
     if (feat_dist16(tx, tz, FEAT_DUNGEON) < 3 * 16) return TEX_DIRT;
@@ -242,6 +272,14 @@ static int pick_tex(int tx, int tz, int h00, int h10, int h01, int h11, unsigned
     return ((hv >> 3) % 6 == 0) ? TEX_GRASS2 : TEX_GRASS;
 }
 
+static unsigned char Tr[HW][HW], Tg[HW][HW], Tb[HW][HW];
+static int smoothi(int x, int a, int b) {                 // smoothstep 0..256
+    if (a == b) return x >= a ? 256 : 0;
+    int t = ((x - a) * 256) / (b - a); t = clampi(t, 0, 256);
+    return (t * t * (768 - 2 * t)) >> 16;
+}
+static void mixc(int* c, int r, int g, int b, int w) { c[0] += ((r - c[0]) * w) >> 8; c[1] += ((g - c[1]) * w) >> 8; c[2] += ((b - c[2]) * w) >> 8; }
+
 static void draw_terrain(void) {
     int cx = P.x >> 12, cz = P.z >> 12;
     int bx = cx - R_VIEW - 1, bz = cz - R_VIEW - 1;
@@ -252,9 +290,29 @@ static void draw_terrain(void) {
         int len = 4096 + (((sx * sx) >> 12) + ((sz * sz) >> 12)) / 2;
         int sh = clampi((dot * 4096) / len, 0, 4096);
         SHc[j][i] = (unsigned char)(56 + ((sh * 199) >> 12));
+        // cor do bioma por vertice: varia de forma CONTINUA com altura/inclinacao -> transicoes suaves (Gouraud)
+        int h = Hc[j][i], slope = maxi(absi(sx), absi(sz));
+        int vx = bx + i, vz = bz + j;
+        int c[3] = { 98, 170, 66 };                                                   // grama
+        mixc(c, 176, 164, 84, (smoothi(h, U(3.5), U(7.0)) * 150) >> 8);               // grama seca em terreno alto
+        mixc(c, 238, 218, 166, 256 - smoothi(h, U(0.3), U(1.4)));                     // areia perto da agua
+        mixc(c, 120, 142, 132, smoothi(-h, 0, U(1.4)));                               // fundo do lago
+        mixc(c, 150, 146, 140, maxi(smoothi(slope, U(0.75), U(1.5)), smoothi(h, U(7.5), U(12))));   // rocha
+        mixc(c, 250, 252, 255, (smoothi(h, U(12), U(16)) * (256 - smoothi(slope, U(1.4), U(2.6)))) >> 8);  // neve
+        int dv = feat_dist16(vx, vz, FEAT_VILLAGE);
+        if (dv < 11 * 16) {
+            mixc(c, 162, 124, 86, (256 - smoothi(dv, 5 * 16, 11 * 16)) * 80 >> 8);    // terra batida ao redor da vila
+            mixc(c, 172, 166, 152, 256 - smoothi(dv, 2 * 16, 4 * 16));                // praca de pedra
+        }
+        int dd = feat_dist16(vx, vz, FEAT_DUNGEON);
+        if (dd < 6 * 16) mixc(c, 150, 118, 84, 256 - smoothi(dd, 2 * 16, 6 * 16));
+        int jit = 246 + (int)(hash3(vx, vz, 7) & 15);                                 // variacao sutil por vertice
+        Tr[j][i] = (unsigned char)mini(255, c[0] * jit >> 8);
+        Tg[j][i] = (unsigned char)mini(255, c[1] * jit >> 8);
+        Tb[j][i] = (unsigned char)mini(255, c[2] * jit >> 8);
     }
     nvis = 0;
-    static int wlist[700], nw; nw = 0;
+    static int wlist[1400], nw; nw = 0;
     int lastTex = -1, lastAlpha = -1;
     for (int tz = cz - R_VIEW; tz <= cz + R_VIEW; tz++)
         for (int tx = cx - R_VIEW; tx <= cx + R_VIEW; tx++) {
@@ -264,26 +322,25 @@ static void draw_terrain(void) {
             int fd = (rx * gFX + rz * gFZ) >> 12;
             int sd = (rx * gRX + rz * gRZ) >> 12;
             if (fd < -U(1.6) || absi(sd) > fd + U(2.6)) continue;
-            if (nvis < 900) { visTx[nvis] = tx; visTz[nvis] = tz; visD2[nvis] = d2; nvis++; }
+            if (nvis < 2000) { visTx[nvis] = tx; visTz[nvis] = tz; visD2[nvis] = d2; nvis++; }
             int a = tx - bx, b = tz - bz;
             int h00 = Hc[b][a], h10 = Hc[b][a + 1], h01 = Hc[b + 1][a], h11 = Hc[b + 1][a + 1];
             unsigned hv = hash3(tx, tz, 99);
             int tex = pick_tex(tx, tz, h00, h10, h01, h11, hv);
             int alpha = fade_alpha(d2);
-            if (mini(mini(h00, h10), mini(h01, h11)) < SEA_LEVEL && nw < 700) wlist[nw++] = (nvis - 1);
-            int tint = 214 + (int)(hv & 31) + ((hv >> 5) & 7);
-            if (tint > 256) tint = 256;
+            if (mini(mini(h00, h10), mini(h01, h11)) < SEA_LEVEL && nw < 1400) wlist[nw++] = (nvis - 1);
             if (tex != lastTex) { glBindTexture(0, texId[tex]); lastTex = tex; }
             if (alpha != lastAlpha) { glPolyFmt(POLY_ALPHA(alpha) | POLY_CULL_NONE | POLY_ID(alpha < 31 ? 4 : 1)); lastAlpha = alpha; }
             int uA = (hv & 2) ? 64 : 0, uB = (hv & 2) ? 0 : 64;
             int vA = (hv & 4) ? 64 : 0, vB = (hv & 4) ? 0 : 64;
             glBegin(GL_QUADS);
-            glColor(lit(SHc[b][a],         tint)); TC(uA, vA); vtx(tx << 12,       h00, tz << 12);
-            glColor(lit(SHc[b][a + 1],     tint)); TC(uB, vA); vtx((tx + 1) << 12, h10, tz << 12);
-            glColor(lit(SHc[b + 1][a + 1], tint)); TC(uB, vB); vtx((tx + 1) << 12, h11, (tz + 1) << 12);
-            glColor(lit(SHc[b + 1][a],     tint)); TC(uA, vB); vtx(tx << 12,       h01, (tz + 1) << 12);
+            glColor(litrgb(SHc[b][a], Tr[b][a], Tg[b][a], Tb[b][a])); TC(uA, vA); vtx(tx << 12,       h00, tz << 12);
+            glColor(litrgb(SHc[b][a + 1], Tr[b][a + 1], Tg[b][a + 1], Tb[b][a + 1])); TC(uB, vA); vtx((tx + 1) << 12, h10, tz << 12);
+            glColor(litrgb(SHc[b + 1][a + 1], Tr[b + 1][a + 1], Tg[b + 1][a + 1], Tb[b + 1][a + 1])); TC(uB, vB); vtx((tx + 1) << 12, h11, (tz + 1) << 12);
+            glColor(litrgb(SHc[b + 1][a], Tr[b + 1][a], Tg[b + 1][a], Tb[b + 1][a])); TC(uA, vB); vtx(tx << 12,       h01, (tz + 1) << 12);
             glEnd();
         }
+    g_nwater = nw;
     // agua (translucida, animada)
     if (nw) {
         glBindTexture(0, texId[TEX_WATER]);
@@ -358,8 +415,11 @@ static void draw_entrance3d(int wx, int wy, int wz) {
 
 static void draw_world_objects(void) {
     // arvores (sprites 2D)
-    for (int k = 0; k < nvis; k++) {
+    int budget = 1400 - nvis - g_nwater - 150;           // o DS aguenta ~1536 quads por frame
+    for (int pass = 0; pass < 2; pass++)                  // arvores proximas primeiro
+    for (int k = 0; k < nvis && budget > 0; k++) {
         TreeInfo ti;
+        if ((visD2[k] < (R_VIEW * R_VIEW) / 4) != (pass == 0)) continue;
         if (!tree_at(visTx[k], visTz[k], &ti)) continue;
         int wx = (visTx[k] << 12) + ti.ox, wz = (visTz[k] << 12) + ti.oz;
         int wy = world_height_at(wx, wz) - U(0.05);
@@ -367,6 +427,7 @@ static void draw_world_objects(void) {
         int tex = ti.type == TREE_PINE ? TEX_TREE_PINE : (ti.type == TREE_OAK ? TEX_TREE_OAK : TEX_TREE_DEAD);
         int w = ti.type == TREE_PINE ? U(1.8) : U(2.2), h = ti.type == TREE_PINE ? U(2.9) : U(2.5);
         bb(tex, wx, wy, wz, w, h, alpha, litc(220 + (int)((ti.ox >> 4) & 31)));
+        budget--;
     }
     // vilas
     for (int i = 0; i < nnearH; i++) {
@@ -847,6 +908,7 @@ static void title_render(void) {
 // gancho usado apenas pelo teste no PC (tools/host_test.sh): teleporta p/ uma dungeon e volta
 static void host_test_hook(void) {
     { extern unsigned long g_noise_calls; static unsigned long last; if (frameNo <= 8 || frameNo % 500 == 0) printf("  [f=%d] noise2/frame=%lu\n", frameNo, g_noise_calls - last); last = g_noise_calls; }
+    if (frameNo % 1000 == 0) printf("  clamps(v16)=%d nvis=%d\n", g_clamps, nvis);
     if (frameNo % 500 == 0) { int na = 0; for (int i = 0; i < MAX_EN; i++) na += en[i].active; printf("f=%d state=%d dg=%d pos=(%.1f,%.1f) h=%.2f hp=%d lv=%d kills=%d gold=%d enemies=%d day=%d\n", frameNo, gstate, inDungeon, P.x / 4096.0, P.z / 4096.0, P.ground / 4096.0, P.hp, P.level, P.kills, P.gold, na, dayf); }
     if (gstate != ST_PLAY) return;
     if (frameNo == 400) {
