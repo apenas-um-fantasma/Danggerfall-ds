@@ -37,6 +37,16 @@
 #define MAX_EN          24
 #define SEED            1337u
 
+
+// ---- espera de VBlank por polling do VCOUNT: funciona mesmo se a IRQ de VBlank nao estiver ativa (libnds 2.x/calico)
+#ifdef HOST_TEST
+static void wait_vbl(void) { swiWaitForVBlank(); }
+#else
+#define MY_VCOUNT (*(volatile u16*)0x04000006)
+#define MY_POWCNT (*(volatile u16*)0x04000304)
+static void wait_vbl(void) { while (MY_VCOUNT >= 192) {} while (MY_VCOUNT < 192) {} }
+#endif
+
 // ------------------------------------------------------------------ utilidades
 static inline int absi(int v) { return v < 0 ? -v : v; }
 static inline int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -802,6 +812,7 @@ static void title_draw_menu(void) {
 
 static void title_update(void) {
     int down = keysDown();
+    { static int tk = 0; if ((++tk & 15) == 0) { char b[40]; snprintf(b, sizeof b, "frame %d  teclas %x", frameNo, (unsigned)keysHeld()); put(22, b); } }
     if (helpPage) { if (down & (KEY_A | KEY_B | KEY_TOUCH)) { helpPage = 0; consoleClear(); title_draw_menu(); } return; }
     if (down & KEY_UP)   { menuSel = (menuSel + 2) % 3; }
     if (down & KEY_DOWN) { menuSel = (menuSel + 1) % 3; }
@@ -851,6 +862,9 @@ static void host_test_hook(void) {
 
 // ------------------------------------------------------------------ main
 int main(void) {
+#ifndef HOST_TEST
+    MY_POWCNT |= 0x820F;            // LCD, 2D A, 3D render+geometria, 2D B, engine A na tela de cima
+#endif
     videoSetMode(MODE_0_3D);
     videoSetModeSub(MODE_0_2D);
     vramSetBankA(VRAM_A_TEXTURE); vramSetBankB(VRAM_B_TEXTURE); vramSetBankC(VRAM_C_TEXTURE); vramSetBankD(VRAM_D_TEXTURE);
@@ -875,7 +889,7 @@ int main(void) {
     put(3, "3/4 texturas ok");
     world_init(SEED);
     put(4, "4/4 mundo ok");
-    for (int i = 0; i < 20; i++) swiWaitForVBlank();    // mostra as etapas por um instante
+    for (int i = 0; i < 20; i++) wait_vbl();    // mostra as etapas por um instante
     consoleClear();
     rngs ^= (unsigned)(SEED * 7919u);
 
@@ -920,7 +934,7 @@ int main(void) {
             break;
         }
         glFlush(0);
-        swiWaitForVBlank();
+        wait_vbl();
     }
     return 0;
 }
