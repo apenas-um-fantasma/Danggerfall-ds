@@ -20,16 +20,13 @@
 #include "gfx_data.h"
 
 // ------------------------------------------------------------------ configuracao (ajuste aqui)
-#define R_VIEW          22          // DISTANCIA DE RENDERIZACAO em tiles (13 = antigo, 22 = padrao, max 30)
+#define R_MAX           30          // maximo da distancia de renderizacao (tiles)
+#define GEO_SHIFT       2           // vertices guardados em escala 1/4 (cabe ate 30 tiles no v16 do DS)
+#define PITCH_SIGN      1           // se olhar para cima/baixo sair invertido, troque para -1
+#define PITCH_MAX       7200        // limite de inclinacao da camera (~40 graus)
+static int gRView = 22;             // distancia de renderizacao ATUAL (muda em Configuracoes)
+#define R_VIEW          gRView
 #define FADE_TILES      (R_VIEW / 4)  // largura do anel que "dissolve" no ceu
-#if R_VIEW > 30
-#  error "R_VIEW maximo = 30"
-#endif
-#if R_VIEW > 13
-#  define GEO_SHIFT 2               // vertices guardados em escala 1/4 (cabe mais mundo no v16 do DS)
-#else
-#  define GEO_SHIFT 1
-#endif
 #define HOUSE_3D_DIST   U(8.0)      // abaixo disso a casa vira 3D; acima disso e sprite 2D
 #define DG_3D_DIST      U(9.0)
 #define EYE             U(0.8)
@@ -38,7 +35,7 @@
 #define TURN_SPEED      560         // unidades de 1/32768 de volta por tick
 #define VIEW_ROT_SIGN   1           // se a camera girar ao contrario, troque para -1
 #define DAY_LEN         14400       // ticks (60/s) -> 4 minutos por dia
-#define HW              (2 * R_VIEW + 4)
+#define HW              (2 * R_MAX + 4)
 #define DG_C            U(1.5)      // tamanho de uma celula de dungeon
 #define DG_WALL_H       U(1.6)
 #define DG_RADIUS       8
@@ -49,7 +46,22 @@
 // ---- espera de VBlank por polling do VCOUNT: funciona mesmo se a IRQ de VBlank nao estiver ativa (libnds 2.x/calico)
 #ifdef HOST_TEST
 static void wait_vbl(void) { swiWaitForVBlank(); }
+#endif
+static int fpsShown = 0;
+#ifdef HOST_TEST
+static void fps_init(void) {}
+static void fps_tick(void) { fpsShown = 60; }
 #else
+#define MY_T3D (*(volatile u16*)0x0400010C)
+#define MY_T3C (*(volatile u16*)0x0400010E)
+static void fps_init(void) { MY_T3C = 0; MY_T3D = 0; MY_T3C = 0x0083; }     // timer 3 livre a ~32,7 kHz
+static void fps_tick(void) {
+    static u16 last = 0; static int acc = 0, frames = 0;
+    u16 now = MY_T3D; acc += (u16)(now - last); last = now; frames++;
+    if (acc >= 32728) { fpsShown = (frames * 32728 + acc / 2) / acc; acc = 0; frames = 0; }
+}
+#endif
+#ifndef HOST_TEST
 #define MY_VCOUNT (*(volatile u16*)0x04000006)
 #define MY_POWCNT (*(volatile u16*)0x04000304)
 static void wait_vbl(void) { while (MY_VCOUNT >= 192) {} while (MY_VCOUNT < 192) {} }
@@ -73,7 +85,7 @@ static int helpPage = 0;
 static int menuSel = 0;
 
 typedef struct {
-    int x, z, y, ground, yaw;
+    int x, z, y, ground, yaw, pitch;
     int hp, maxhp, xp, level, gold, potions, kills;
     int weapon;                 // 0 = punho, 1 = espada
     int atk_t, hurt_t, bob;
@@ -82,6 +94,9 @@ static Player P;
 
 typedef struct { int active, type, boss, x, z, hp, maxhp, cd, atk_t, dead_t, anim, hurt_t; } Enemy;
 static Enemy en[MAX_EN];
+
+typedef struct { int fps, trees, monsters, clouds, sens, invertY; } Settings;
+static Settings cfg = { 0, 1, 1, 1, 3, 0 };     // FPS off, arvores on, monstros on, nuvens on, sensibilidade 3, Y normal
 
 static int inDungeon = 0;
 static Dungeon dg;
@@ -134,17 +149,21 @@ static inline short v16c(int f) {
 }
 static inline void vtx(int wx, int wy, int wz) { glVertex3v16(v16c(wx - gox), v16c(wy - goy), v16c(wz - goz)); }
 
+static void set_modelview(void) {
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
+    if (P.pitch) glRotateXi(-PITCH_SIGN * P.pitch);
+    glRotateYi(VIEW_ROT_SIGN * (P.yaw & 0x7FFF));
+    glTranslate3f32(-(P.x - gox), -(P.y - goy), -(P.z - goz));
+    glScalef32(inttof32(1 << GEO_SHIFT), inttof32(1 << GEO_SHIFT), inttof32(1 << GEO_SHIFT));
+}
 static void setup_camera(void) {
     int yaw = P.yaw & 0x7FFF;
     gFX = sinLerp(yaw); gFZ = -cosLerp(yaw);
     gRX = cosLerp(yaw); gRZ = sinLerp(yaw);
     gox = (P.x >> 12) << 12; goy = (P.y >> 12) << 12; goz = (P.z >> 12) << 12;
     glMatrixMode(GL_PROJECTION); glLoadIdentity();
-    gluPerspective(70, 256.0 / 192.0, 0.25, R_VIEW + 8);
-    glMatrixMode(GL_MODELVIEW); glLoadIdentity();
-    glRotateYi(VIEW_ROT_SIGN * yaw);
-    glTranslate3f32(-(P.x - gox), -(P.y - goy), -(P.z - goz));
-    glScalef32(inttof32(1 << GEO_SHIFT), inttof32(1 << GEO_SHIFT), inttof32(1 << GEO_SHIFT));
+    gluPerspective(70, 256.0 / 192.0, 0.25, R_VIEW + 10);
+    set_modelview();
 }
 
 static unsigned short lit(int sh, int tint) {          // sh,tint 0..256 -> cor 15 bits
@@ -222,10 +241,10 @@ static void build_near_lists(void) {
         }
 }
 
-static int alphaTab[R_VIEW * R_VIEW + 1], alphaTabOk = 0;
+static int alphaTab[R_MAX * R_MAX + 1], alphaTabOk = 0;
 static int fade_alpha(int d2) {
     if (d2 >= 0 && d2 <= R_VIEW * R_VIEW) {
-        if (!alphaTabOk) { for (int i = 0; i <= R_VIEW * R_VIEW; i++) { int dd = isqrt((unsigned)(i << 8)); int lim = (R_VIEW - FADE_TILES) * 16; alphaTab[i] = dd <= lim ? 31 : clampi(31 - ((dd - lim) * 28) / (FADE_TILES * 16), 3, 31); } alphaTabOk = 1; }
+        if (alphaTabOk != gRView) { for (int i = 0; i <= R_VIEW * R_VIEW; i++) { int dd = isqrt((unsigned)(i << 8)); int lim = (R_VIEW - FADE_TILES) * 16; alphaTab[i] = dd <= lim ? 31 : clampi(31 - ((dd - lim) * 28) / (FADE_TILES * 16), 3, 31); } alphaTabOk = gRView; }
         return alphaTab[d2];
     }
     int dd = isqrt((unsigned)(d2 << 8));            // distancia * 16
@@ -321,7 +340,7 @@ static void draw_terrain(void) {
             int rx = (tx << 12) + 2048 - P.x, rz = (tz << 12) + 2048 - P.z;
             int fd = (rx * gFX + rz * gFZ) >> 12;
             int sd = (rx * gRX + rz * gRZ) >> 12;
-            if (fd < -U(1.6) || absi(sd) > fd + U(2.6)) continue;
+            if (fd < -U(2.5) || absi(sd) > fd + U(4.5)) continue;
             if (nvis < 2000) { visTx[nvis] = tx; visTz[nvis] = tz; visD2[nvis] = d2; nvis++; }
             int a = tx - bx, b = tz - bz;
             int h00 = Hc[b][a], h10 = Hc[b][a + 1], h01 = Hc[b + 1][a], h11 = Hc[b + 1][a + 1];
@@ -417,7 +436,7 @@ static void draw_world_objects(void) {
     // arvores (sprites 2D)
     int budget = 1400 - nvis - g_nwater - 150;           // o DS aguenta ~1536 quads por frame
     for (int pass = 0; pass < 2; pass++)                  // arvores proximas primeiro
-    for (int k = 0; k < nvis && budget > 0; k++) {
+    for (int k = 0; k < nvis && budget > 0 && cfg.trees; k++) {
         TreeInfo ti;
         if ((visD2[k] < (R_VIEW * R_VIEW) / 4) != (pass == 0)) continue;
         if (!tree_at(visTx[k], visTz[k], &ti)) continue;
@@ -551,6 +570,7 @@ static void draw_logo(void) {
 
 // ------------------------------------------------------------------ mundo: colisao
 static int tree_blocks(int nx, int nz) {
+    if (!cfg.trees) return 0;
     int tx0 = nx >> 12, tz0 = nz >> 12;
     for (int tz = tz0 - 1; tz <= tz0 + 1; tz++)
         for (int tx = tx0 - 1; tx <= tx0 + 1; tx++) {
@@ -682,6 +702,27 @@ static void update_player(void) {
     // giro
     if (held & KEY_LEFT)  P.yaw -= TURN_SPEED;
     if (held & KEY_RIGHT) P.yaw += TURN_SPEED;
+    // camera livre pela tela de toque: arraste para girar e olhar para cima/baixo; toque rapido = centralizar
+    {
+        static int tActive = 0, tPx = 0, tPy = 0, tFrames = 0, tMove = 0;
+        if (held & KEY_TOUCH) {
+            touchPosition t; touchRead(&t);
+            if (!tActive) { tActive = 1; tFrames = 0; tMove = 0; }
+            else {
+                int dx = t.px - tPx, dy = t.py - tPy;
+                if (absi(dx) < 90 && absi(dy) < 90) {
+                    P.yaw += dx * 30 * cfg.sens;
+                    P.pitch += (cfg.invertY ? dy : -dy) * 23 * cfg.sens;
+                    tMove += absi(dx) + absi(dy);
+                }
+            }
+            tPx = t.px; tPy = t.py; tFrames++;
+        } else {
+            if (tActive && tFrames < 14 && tMove < 8) P.pitch = 0;
+            tActive = 0;
+        }
+        P.pitch = clampi(P.pitch, -PITCH_MAX, PITCH_MAX);
+    }
     P.yaw &= 0x7FFF;
     int fx = sinLerp(P.yaw), fz = -cosLerp(P.yaw), rx = cosLerp(P.yaw), rz = sinLerp(P.yaw);
     int spd = (held & KEY_B) ? RUN_SPEED : WALK_SPEED;
@@ -736,7 +777,7 @@ static void update_player(void) {
 }
 
 static void update_spawns(void) {
-    if (inDungeon) return;
+    if (inDungeon || !cfg.monsters) return;
     if (--spawnTimer > 0) return;
     spawnTimer = (dayf < 1200) ? 140 : 300;
     int cnt = 0; for (int i = 0; i < MAX_EN; i++) if (en[i].active && !en[i].dead_t) cnt++;
@@ -778,7 +819,7 @@ static void hud_minimap(void) {
     }
     int cx = P.x >> 12, cz = P.z >> 12;
     for (int r = 0; r < 11; r++) {
-        for (int c = 0; c < 31; c++) line[c] = (char)world_biome_char(cx + (c - 15) * 3, cz + (r - 5) * 3);
+        for (int c = 0; c < 31; c++) { char ch = (char)world_biome_char(cx + (c - 15) * 3, cz + (r - 5) * 3); if (ch == 'f' && !cfg.trees) ch = '.'; line[c] = ch; }
         line[31] = 0;
         for (int i = 0; i < nnearF; i++) {
             int c = (nearF[i].cx - cx + (nearF[i].cx - cx >= 0 ? 1 : -1)) / 3 + 15, rr = (nearF[i].cz - cz + (nearF[i].cz - cz >= 0 ? 1 : -1)) / 3 + 5;
@@ -801,7 +842,8 @@ static const char* compass(void) {
 
 static void hud_update(void) {
     char b[48];
-    snprintf(b, sizeof b, "DAGGERFALL DS     Nv %d", P.level); put(0, b);
+    if (cfg.fps) snprintf(b, sizeof b, "DAGGERFALL DS  Nv %d  FPS %d", P.level, fpsShown); else snprintf(b, sizeof b, "DAGGERFALL DS     Nv %d", P.level);
+    put(0, b);
     int bars = (P.hp * 12) / P.maxhp; if (bars < 0) bars = 0;
     char bar[13]; for (int i = 0; i < 12; i++) bar[i] = i < bars ? '#' : '-'; bar[12] = 0;
     snprintf(b, sizeof b, "PV [%s] %d/%d", bar, P.hp, P.maxhp); put(1, b);
@@ -814,7 +856,7 @@ static void hud_update(void) {
     put(17, "~agua f mata V vila D dung e");
     put(18, "A atacar  B correr  X arma");
     put(19, "L/R lado  Y agir  SELECT pocao");
-    put(20, "START pausa");
+    put(20, "START pausa  Tela: olhar");
     if (multi) {   // mensagens multilinha (dialogos)
         char tmp[120]; strncpy(tmp, msg, 119); tmp[119] = 0; char* l = tmp; int row = 21;
         while (l && row < 24) { char* nl = strchr(l, '\n'); if (nl) *nl = 0; put(row++, l); l = nl ? nl + 1 : 0; }
@@ -823,17 +865,78 @@ static void hud_update(void) {
 }
 
 // ------------------------------------------------------------------ cenas
+// ------------------------------------------------------------------ ceu (sol, lua, nuvens) - sincronizado com worldTime
+static short sclamp(int v) { return (short)(v > 32767 ? 32767 : (v < -32767 ? -32767 : v)); }
+static inline void vtxs(int x, int y, int z) { glVertex3v16(sclamp(x >> 3), sclamp(y >> 3), sclamp(z >> 3)); }
+
+// quad voltado para a camera, na direcao d (vetor unitario 4.12) a distancia D; vertices relativos a camera (ceu = no infinito)
+static void sky_quad(int tex, int dx, int dy, int dz, int D, int hw, int hh, int alpha, unsigned short col, int pid) {
+    int hyp = isqrt((unsigned)(dx * dx + dz * dz)), rx, rz;
+    if (hyp < 300) { rx = gRX; rz = gRZ; } else { rx = (-dz * 4096) / hyp; rz = (dx * 4096) / hyp; }
+    int ux = (-rz * dy) >> 12, uy = (rz * dx - rx * dz) >> 12, uz = (rx * dy) >> 12;      // u = r x d
+    int cx = (dx * D) >> 12, cy = (dy * D) >> 12, cz = (dz * D) >> 12;
+    int rwx = (rx * hw) >> 12, rwz = (rz * hw) >> 12;
+    int uhx = (ux * hh) >> 12, uhy = (uy * hh) >> 12, uhz = (uz * hh) >> 12;
+    int tw = gTexDefs[tex].w, th = gTexDefs[tex].h;
+    glPolyFmt(POLY_ALPHA(alpha) | POLY_CULL_NONE | POLY_ID(pid));
+    glBindTexture(0, texId[tex]);
+    glColor(col);
+    glBegin(GL_QUADS);
+    TC(0, th);  vtxs(cx - rwx - uhx, cy - uhy, cz - rwz - uhz);
+    TC(tw, th); vtxs(cx + rwx - uhx, cy - uhy, cz + rwz - uhz);
+    TC(tw, 0);  vtxs(cx + rwx + uhx, cy + uhy, cz + rwz + uhz);
+    TC(0, 0);   vtxs(cx - rwx + uhx, cy + uhy, cz - rwz + uhz);
+    glEnd();
+}
+
+static void draw_sky(void) {
+    if (inDungeon) return;
+    int D = (R_VIEW + 7) << 12;
+    glMatrixMode(GL_MODELVIEW); glLoadIdentity();                 // so rotacao (o ceu nao tem paralaxe)
+    if (P.pitch) glRotateXi(-PITCH_SIGN * P.pitch);
+    glRotateYi(VIEW_ROT_SIGN * (P.yaw & 0x7FFF));
+    glScalef32(inttof32(8), inttof32(8), inttof32(8));
+    int ang = (worldTime * 32768 / DAY_LEN) & 0x7FFF;             // mesma fase do ciclo dia/noite
+    int ca = cosLerp(ang), sa = sinLerp(ang);
+    int sdx = (ca * 3900) >> 12, sdy = (sa * 3900) >> 12, sdz = 1250;   // sol: nasce a leste (+x), poe a oeste, inclinado p/ sul
+    if (sdy > -250) sky_quad(TEX_SUN, sdx, sdy, sdz, D, (D * 300) >> 12, (D * 300) >> 12, 31, RGB15(31, 31, 31), 7);
+    if (-sdy > -250) sky_quad(TEX_MOON, -sdx, -sdy, -sdz, D, (D * 240) >> 12, (D * 240) >> 12, 31, RGB15(31, 31, 31), 8);
+    if (cfg.clouds) {
+        static int init = 0, caz[18], cel[18], csz[18];
+        if (!init) {
+            for (int i = 0; i < 18; i++) {
+                unsigned h = hash3(i, 77, 5);
+                caz[i] = (int)(h & 0x7FFF); int r = (int)((h >> 15) % 100);
+                cel[i] = 900 + (r * r * 5500) / 10000;               // mais nuvens perto do horizonte
+                csz[i] = 650 + (int)((h >> 22) % 350);
+            }
+            init = 1;
+        }
+        unsigned short col = RGB15(mini(31, (31 * ambR) >> 8), mini(31, (31 * ambG) >> 8), mini(31, (31 * ambB) >> 8));
+        int drift = frameNo >> 2;                                    // vento lento
+        for (int i = 0; i < 18; i++) {
+            int az = (caz[i] + drift) & 0x7FFF, ce = cosLerp(cel[i]);
+            int dx = (sinLerp(az) * ce) >> 12, dz = -((cosLerp(az) * ce) >> 12), dy = sinLerp(cel[i]);
+            int hw = (D * csz[i]) >> 12;
+            sky_quad(TEX_CLOUD0 + (i % 3), dx, dy, dz, D, hw, hw >> 1, 22, col, 9);
+        }
+    }
+    set_modelview();                                                // restaura a matriz do mundo
+}
+
 static void set_sky(void) {
     if (inDungeon) { glClearColor(0, 0, 0, 31); return; }
-    int r = 3 + ((dayf * 13) >> 12) , g = 4 + ((dayf * 18) >> 12), b = 9 + ((dayf * 20) >> 12);
-    glClearColor(r + 2, g + 3, b + 2, 31);
+    int ang = (worldTime * 32768 / DAY_LEN) & 0x7FFF;
+    int warm = clampi(4096 - absi(sinLerp(ang)) * 3, 0, 4096);       // forte quando o sol esta no horizonte
+    int r = 3 + ((dayf * 13) >> 12) + ((warm * 10) >> 12), g = 4 + ((dayf * 18) >> 12) + ((warm * 4) >> 12), b = 9 + ((dayf * 20) >> 12) - ((warm * 6) >> 12);
+    glClearColor(mini(31, r + 2), mini(31, g + 3), clampi(b + 2, 2, 31), 31);
 }
 
 static void render_scene(void) {
     setup_camera();
     set_sky();
     if (inDungeon) { draw_dungeon(); draw_enemies(); }
-    else { build_near_lists(); draw_terrain(); draw_world_objects(); draw_enemies(); }
+    else { draw_sky(); build_near_lists(); draw_terrain(); draw_world_objects(); draw_enemies(); }
 }
 
 static void new_game(void) {
@@ -848,46 +951,102 @@ static void new_game(void) {
 }
 
 // ------------------------------------------------------------------ titulo
+// ------------------------------------------------------------------ configuracoes
+static int inSettings = 0, settingsFromTitle = 0, setSel = 0;
+#define NSET 8
+static void title_draw_menu(void);
+static void pause_draw(void) {
+    consoleClear();
+    put(8, "       -- PAUSA --"); put(10, "START: continuar"); put(12, "A: configuracoes"); put(14, "SELECT: voltar ao titulo");
+}
+static void settings_draw(void) {
+    char b[40];
+    put(0, "        CONFIGURACOES");
+    snprintf(b, sizeof b, "%c Distancia render   %2d", setSel == 0 ? '>' : ' ', gRView); put(3, b);
+    snprintf(b, sizeof b, "%c Mostrar FPS        %s", setSel == 1 ? '>' : ' ', cfg.fps ? "SIM" : "NAO"); put(5, b);
+    snprintf(b, sizeof b, "%c Arvores            %s", setSel == 2 ? '>' : ' ', cfg.trees ? "SIM" : "NAO"); put(7, b);
+    snprintf(b, sizeof b, "%c Monstros (mundo)   %s", setSel == 3 ? '>' : ' ', cfg.monsters ? "SIM" : "NAO"); put(9, b);
+    snprintf(b, sizeof b, "%c Nuvens             %s", setSel == 4 ? '>' : ' ', cfg.clouds ? "SIM" : "NAO"); put(11, b);
+    snprintf(b, sizeof b, "%c Sensib. camera     %d", setSel == 5 ? '>' : ' ', cfg.sens); put(13, b);
+    snprintf(b, sizeof b, "%c Inverter eixo Y    %s", setSel == 6 ? '>' : ' ', cfg.invertY ? "SIM" : "NAO"); put(15, b);
+    snprintf(b, sizeof b, "%c Voltar", setSel == 7 ? '>' : ' '); put(17, b);
+    put(20, "Cima/Baixo: escolher   B: sair"); put(21, "Esq/Dir ou A: mudar  (dungeon");
+    put(22, "sempre tem monstros)");
+}
+static void settings_change(int i, int act) {            // act: -1 esquerda, +1 direita, 2 = A
+    switch (i) {
+    case 0: gRView += (act == -1) ? -2 : 2; if (gRView > R_MAX) gRView = (act == 2) ? 10 : R_MAX; if (gRView < 10) gRView = 10; break;
+    case 1: cfg.fps ^= 1; break;
+    case 2: cfg.trees ^= 1; break;
+    case 3: cfg.monsters ^= 1; if (!cfg.monsters && !inDungeon) memset(en, 0, sizeof en); break;
+    case 4: cfg.clouds ^= 1; break;
+    case 5: cfg.sens += (act == -1) ? -1 : 1; if (cfg.sens > 5) cfg.sens = (act == 2) ? 1 : 5; if (cfg.sens < 1) cfg.sens = 1; break;
+    case 6: cfg.invertY ^= 1; break;
+    }
+}
+static void settings_exit(void) {
+    inSettings = 0; consoleClear();
+    if (settingsFromTitle) title_draw_menu(); else pause_draw();
+}
+static void settings_update(void) {
+    int down = keysDown(), act = 0;
+    if (down & KEY_UP)   setSel = (setSel + NSET - 1) % NSET;
+    if (down & KEY_DOWN) setSel = (setSel + 1) % NSET;
+    if (down & KEY_LEFT) act = -1;
+    if (down & KEY_RIGHT) act = 1;
+    if (down & KEY_A) act = 2;
+    if (down & KEY_TOUCH) {
+        touchPosition t; touchRead(&t); int row = t.py / 8;
+        if (row >= 3 && row <= 18) { setSel = (row - 3) / 2; act = 2; }
+    }
+    if (down & (KEY_B | KEY_START)) { settings_exit(); return; }
+    if (act) { if (setSel == 7) { settings_exit(); return; } settings_change(setSel, act); }
+    if (down) settings_draw();
+}
+
+// ------------------------------------------------------------------ titulo
 static void title_draw_menu(void) {
     put(1, "");
     put(3, "   D A G G E R F A L L   D S");
     put(4, "     (teste tecnico - NDS)");
     if (helpPage == 0) {
-        put(9,  menuSel == 0 ? "      > NOVO JOGO" : "        NOVO JOGO");
-        put(11, menuSel == 1 ? "      > COMO JOGAR" : "        COMO JOGAR");
-        put(13, menuSel == 2 ? "      > SOBRE" : "        SOBRE");
+        put(8,  menuSel == 0 ? "      > NOVO JOGO" : "        NOVO JOGO");
+        put(10, menuSel == 1 ? "      > CONFIGURACOES" : "        CONFIGURACOES");
+        put(12, menuSel == 2 ? "      > COMO JOGAR" : "        COMO JOGAR");
+        put(14, menuSel == 3 ? "      > SOBRE" : "        SOBRE");
         put(18, "  Cima/Baixo + A, ou toque");
         for (int r = 19; r < 24; r++) put(r, "");
     } else if (helpPage == 1) {
-        put(7, "Cima/Baixo  andar");  put(8, "Esq/Dir     girar");   put(9, "L / R       andar de lado");
-        put(10, "B           correr");  put(11, "A           atacar");  put(12, "X           espada/punhos");
-        put(13, "Y           falar/abrir/entrar"); put(14, "SELECT      beber pocao"); put(15, "START       pausa");
-        put(18, "       (A para voltar)");
+        put(6, "Cima/Baixo  andar");  put(7, "Esq/Dir     girar");   put(8, "L / R       andar de lado");
+        put(9, "B           correr");  put(10, "A           atacar");  put(11, "X           espada/punhos");
+        put(12, "Y           falar/abrir/entrar"); put(13, "SELECT      beber pocao"); put(14, "START       pausa");
+        put(16, "Arrastar na tela: olhar em"); put(17, "volta (cima/baixo tambem)");
+        put(18, "Toque rapido: centralizar");
+        put(21, "       (A para voltar)");
     } else {
         put(7, "Mundo procedural (Perlin),");  put(8, "vilas, dungeons e arvores.");
         put(9, "Sprites 2D de longe, 3D de");   put(10, "perto. Feito com libnds.");
         put(12, "Texturas geradas por codigo"); put(13, "(sem licenca necessaria).");
-        put(18, "       (A para voltar)");
+        put(21, "       (A para voltar)");
     }
 }
 
 static void title_update(void) {
     int down = keysDown();
-    { static int tk = 0; if ((++tk & 15) == 0) { char b[40]; snprintf(b, sizeof b, "frame %d  teclas %x", frameNo, (unsigned)keysHeld()); put(22, b); } }
     if (helpPage) { if (down & (KEY_A | KEY_B | KEY_TOUCH)) { helpPage = 0; consoleClear(); title_draw_menu(); } return; }
-    if (down & KEY_UP)   { menuSel = (menuSel + 2) % 3; }
-    if (down & KEY_DOWN) { menuSel = (menuSel + 1) % 3; }
+    if (down & KEY_UP)   menuSel = (menuSel + 3) % 4;
+    if (down & KEY_DOWN) menuSel = (menuSel + 1) % 4;
     int pick = -1;
     if (down & KEY_A) pick = menuSel;
     if (down & KEY_TOUCH) {
         touchPosition t; touchRead(&t); int row = t.py / 8;
-        if (row >= 8 && row <= 10) pick = 0; else if (row >= 11 && row <= 12) pick = 1; else if (row >= 13 && row <= 15) pick = 2;
-        if (pick >= 0) menuSel = pick;
+        if (row >= 8 && row <= 15) { pick = (row - 8) / 2; menuSel = pick; }
     }
     if (down & (KEY_UP | KEY_DOWN | KEY_TOUCH)) title_draw_menu();
     if (pick == 0) new_game();
-    else if (pick == 1) { helpPage = 1; consoleClear(); title_draw_menu(); }
-    else if (pick == 2) { helpPage = 2; consoleClear(); title_draw_menu(); }
+    else if (pick == 1) { inSettings = 1; settingsFromTitle = 1; setSel = 0; consoleClear(); settings_draw(); }
+    else if (pick == 2) { helpPage = 1; consoleClear(); title_draw_menu(); }
+    else if (pick == 3) { helpPage = 2; consoleClear(); title_draw_menu(); }
 }
 
 static void title_render(void) {
@@ -898,7 +1057,8 @@ static void title_render(void) {
     P.yaw = (tt * 20) & 0x7FFF; P.ground = world_height_at(P.x, P.z); P.y = P.ground + U(1.5);
     inDungeon = 0; dayf = 4096; ambR = ambG = ambB = 256; frameNo++;
     build_near_lists();
-    setup_camera(); set_sky();
+    P.pitch = 1500;
+    setup_camera(); set_sky(); draw_sky();
     draw_terrain(); draw_world_objects();
     draw_logo();
 }
@@ -919,6 +1079,12 @@ static void host_test_hook(void) {
     }
     if (frameNo == 1800 && inDungeon) leave_dungeon();
     if (frameNo == 2000) { P.hp = P.maxhp; }
+    if (frameNo == 3302 || frameNo == 3338 || frameNo == 3342 || frameNo == 3350) printf("  [menu f=%d] paused=%d inSettings=%d sel=%d  R=%d fps=%d trees=%d monst=%d nuvens=%d sens=%d invY=%d\n", frameNo, paused, inSettings, setSel, gRView, cfg.fps, cfg.trees, cfg.monsters, cfg.clouds, cfg.sens, cfg.invertY);
+    if (frameNo == 1000) gRView = 30;
+    if (frameNo == 1500) { settings_change(2, 2); settings_change(3, 2); settings_change(4, 2); }
+    if (frameNo == 2600) { settings_change(2, 2); settings_change(3, 2); settings_change(4, 2); gRView = 14; }
+    if (frameNo == 3200) gRView = 10;
+    if (frameNo == 4000) gRView = 22;
 }
 #endif
 
@@ -955,6 +1121,7 @@ int main(void) {
     consoleClear();
     rngs ^= (unsigned)(SEED * 7919u);
 
+    fps_init();
     title_draw_menu();
     int hudTick = 0;
     while (1) {
@@ -966,13 +1133,16 @@ int main(void) {
         if (msgT > 0) msgT--;
         switch (gstate) {
         case ST_TITLE:
-            title_update();
+            if (inSettings) settings_update(); else title_update();
             title_render();
             break;
         case ST_PLAY:
-            if (keysDown() & KEY_START) { paused ^= 1; consoleClear(); if (paused) { put(8, "       -- PAUSA --"); put(10, "START: continuar"); put(12, "SELECT: voltar ao titulo"); } }
+            if (inSettings) { settings_update(); }
+            else {
+            if (keysDown() & KEY_START) { paused ^= 1; if (paused) pause_draw(); else consoleClear(); }
             if (paused) {
-                if (keysDown() & KEY_SELECT) { gstate = ST_TITLE; paused = 0; inDungeon = 0; consoleClear(); title_draw_menu(); }
+                if (keysDown() & KEY_A) { inSettings = 1; settingsFromTitle = 0; setSel = 0; consoleClear(); settings_draw(); }
+                else if (keysDown() & KEY_SELECT) { gstate = ST_TITLE; paused = 0; inDungeon = 0; consoleClear(); title_draw_menu(); }
             } else {
                 worldTime = (worldTime + 1) % DAY_LEN;
                 update_daylight();
@@ -980,6 +1150,7 @@ int main(void) {
                 update_player();
                 if (gstate == ST_PLAY) { update_enemies(); update_spawns(); }
                 if (++hudTick >= 6) { hudTick = 0; if (gstate == ST_PLAY) hud_update(); }
+            }
             }
             update_daylight();
             render_scene();
@@ -996,6 +1167,7 @@ int main(void) {
             break;
         }
         glFlush(0);
+        fps_tick();
         wait_vbl();
     }
     return 0;

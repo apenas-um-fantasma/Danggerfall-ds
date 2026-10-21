@@ -43,6 +43,11 @@ enum {
     TEX_FIST0,
     TEX_FIST1,
     TEX_FIST2,
+    TEX_SUN,
+    TEX_MOON,
+    TEX_CLOUD0,
+    TEX_CLOUD1,
+    TEX_CLOUD2,
     TEX_LOGO,
     TEX_COUNT
 };
