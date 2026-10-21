@@ -2,6 +2,8 @@
 # Uso:  make          -> gera daggerfall_ds.nds
 #       make clean
 # Requer devkitPro com o grupo "nds-dev" (libnds + ndstool). Variaveis DEVKITPRO/DEVKITARM definidas.
+# ATENCAO: este Makefile e "melhor esforco". O build oficial (GitHub Actions) usa o Makefile do template do
+#          devkitPro, que garante o binario ARM7 correto (sem ele os botoes nao funcionam e o emulador pode crashar).
 # OBS: se este Makefile falhar na sua versao da libnds, copie o Makefile do template oficial
 #      ($DEVKITPRO/examples/nds/templates/arm9/Makefile) para esta pasta: ele aceita source/*.c direto.
 .SUFFIXES:
@@ -37,12 +39,12 @@ endif
 
 CFLAGS  := -g -Wall -O2 $(ARCH) -fomit-frame-pointer -ffunction-sections -fdata-sections -std=gnu11 -DARM9 $(INCLUDE)
 LDFLAGS := $(SPECS) -g $(ARCH) -Wl,--gc-sections -Wl,-Map,$(BUILD)/$(TARGET).map $(LIBDIRS)
-LIBS    := -lnds9 -lcalico_ds9
+LIBS    := -lnds9
 
 all: $(TARGET).nds
 
 $(TARGET).nds: $(TARGET).elf
-	ndstool -c $@ -9 $< -7 $(ARM7ELF) -b $(CURDIR)/icon.bmp "Daggerfall DS;Teste tecnico 3D;Mundo procedural"
+	ndstool -c $@ -9 $< -7 $(ARM7ELF)
 
 $(TARGET).elf: $(OBJS)
 	arm-none-eabi-gcc $(LDFLAGS) $(OBJS) $(LIBS) -o $@
