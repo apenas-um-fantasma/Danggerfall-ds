@@ -18,13 +18,16 @@
 #include "terrain.h"
 #include "dungeon.h"
 #include "gfx_data.h"
+#ifdef HOST_TEST
+#include <time.h>
+#endif
 
 // ------------------------------------------------------------------ configuracao (ajuste aqui)
-#define R_MAX           20// maximo da distancia de renderizacao (tiles)
+#define R_MAX           30          // maximo da distancia de renderizacao (tiles)
 #define GEO_SHIFT       2           // vertices guardados em escala 1/4 (cabe ate 30 tiles no v16 do DS)
 #define PITCH_SIGN      1           // se olhar para cima/baixo sair invertido, troque para -1
 #define PITCH_MAX       7200        // limite de inclinacao da camera (~40 graus)
-static int gRView = 16;             // distancia de renderizacao ATUAL (muda em Configuracoes)
+static int gRView = 22;             // distancia de renderizacao ATUAL (muda em Configuracoes)
 #define R_VIEW          gRView
 #define FADE_TILES      (R_VIEW / 4)  // largura do anel que "dissolve" no ceu
 #define HOUSE_3D_DIST   U(8.0)      // abaixo disso a casa vira 3D; acima disso e sprite 2D
@@ -60,6 +63,12 @@ static void fps_tick(void) {
     u16 now = MY_T3D; acc += (u16)(now - last); last = now; frames++;
     if (acc >= 32728) { fpsShown = (frames * 32728 + acc / 2) / acc; acc = 0; frames = 0; }
 }
+#endif
+static int profUpd = 0, profRnd = 0, profHud = 0;            // ticks do timer (32,7 por ms)
+#ifdef HOST_TEST
+static u16 prof_now(void) { return 0; }
+#else
+static u16 prof_now(void) { return MY_T3D; }
 #endif
 #ifndef HOST_TEST
 #define MY_VCOUNT (*(volatile u16*)0x04000006)
@@ -255,7 +264,6 @@ static int fade_alpha(int d2) {
 
 // ------------------------------------------------------------------ terreno
 static int Hc[HW][HW];
-static unsigned char SHc[HW][HW];
 #define LX 2160
 #define LY 3230
 #define LZ 1500
@@ -291,45 +299,56 @@ static int pick_tex(int tx, int tz, int h00, int h10, int h01, int h11, unsigned
     return ((hv >> 3) % 6 == 0) ? TEX_GRASS2 : TEX_GRASS;
 }
 
-static unsigned char Tr[HW][HW], Tg[HW][HW], Tb[HW][HW];
-static int smoothi(int x, int a, int b) {                 // smoothstep 0..256
-    if (a == b) return x >= a ? 256 : 0;
+// Sombreamento + cor do bioma de cada vertice do mundo dependem so da POSICAO (nao do frame):
+// ficam num cache persistente e so sao calculados quando um vertice aparece pela 1a vez.
+#define VC 128
+static int vcX[VC * VC], vcZ[VC * VC];
+static unsigned char vcOk[VC * VC], vcSH[VC * VC], vcR[VC * VC], vcG[VC * VC], vcB[VC * VC];
+static int invLen[64], invLenOk = 0;
+static inline __attribute__((always_inline)) int smoothi(int x, int a, int b) {     // smoothstep 0..256
     int t = ((x - a) * 256) / (b - a); t = clampi(t, 0, 256);
     return (t * t * (768 - 2 * t)) >> 16;
 }
-static void mixc(int* c, int r, int g, int b, int w) { c[0] += ((r - c[0]) * w) >> 8; c[1] += ((g - c[1]) * w) >> 8; c[2] += ((b - c[2]) * w) >> 8; }
+static inline __attribute__((always_inline)) void mixc(int* c, int r, int g, int b, int w) { c[0] += ((r - c[0]) * w) >> 8; c[1] += ((g - c[1]) * w) >> 8; c[2] += ((b - c[2]) * w) >> 8; }
+
+static int vget(int j, int i, int bx, int bz) {               // indice do vertice no cache (calcula se necessario)
+    int vx = bx + i, vz = bz + j;
+    int idx = (vx & (VC - 1)) + (vz & (VC - 1)) * VC;
+    if (vcOk[idx] && vcX[idx] == vx && vcZ[idx] == vz) return idx;
+    if (!invLenOk) { for (int k = 0; k < 64; k++) invLen[k] = 16777216 / (4096 + k * 128 + 64); invLenOk = 1; }
+    int sx = (Hc[j][i + 1] - Hc[j][i - 1]) >> 1, sz = (Hc[j + 1][i] - Hc[j - 1][i]) >> 1;
+    int dot = ((-sx * LX - sz * LZ) >> 12) + LY;
+    int k = ((((sx * sx) >> 12) + ((sz * sz) >> 12)) >> 1) >> 7; if (k > 63) k = 63;      // 1/len por tabela (sem divisao)
+    int sh = clampi((dot * invLen[k]) >> 12, 0, 4096);
+    vcSH[idx] = (unsigned char)(56 + ((sh * 199) >> 12));
+    // cor do bioma por vertice: varia de forma CONTINUA com altura/inclinacao -> transicoes suaves (Gouraud)
+    int h = Hc[j][i], slope = maxi(absi(sx), absi(sz));
+    int c[3] = { TINT_GRASS_R, TINT_GRASS_G, TINT_GRASS_B };                                                   // grama
+    mixc(c, TINT_GRASS2_R, TINT_GRASS2_G, TINT_GRASS2_B, (smoothi(h, U(3.5), U(7.0)) * 150) >> 8);               // grama seca em terreno alto
+    mixc(c, TINT_SAND_R, TINT_SAND_G, TINT_SAND_B, 256 - smoothi(h, U(0.3), U(1.4)));                     // areia perto da agua
+    mixc(c, 120, 142, 132, smoothi(-h, 0, U(1.4)));                               // fundo do lago
+    mixc(c, 150, 146, 140, maxi(smoothi(slope, U(0.75), U(1.5)), smoothi(h, U(7.5), U(12))));   // rocha
+    mixc(c, TINT_SNOW_R, TINT_SNOW_G, TINT_SNOW_B, (smoothi(h, U(12), U(16)) * (256 - smoothi(slope, U(1.4), U(2.6)))) >> 8);  // neve
+    int dv = feat_dist16(vx, vz, FEAT_VILLAGE);
+    if (dv < 11 * 16) {
+        mixc(c, TINT_DIRT_R, TINT_DIRT_G, TINT_DIRT_B, (256 - smoothi(dv, 5 * 16, 11 * 16)) * 80 >> 8);    // terra batida ao redor da vila
+        mixc(c, 172, 166, 152, 256 - smoothi(dv, 2 * 16, 4 * 16));                // praca de pedra
+    }
+    int dd = feat_dist16(vx, vz, FEAT_DUNGEON);
+    if (dd < 6 * 16) mixc(c, TINT_DIRT_R, TINT_DIRT_G, TINT_DIRT_B, 256 - smoothi(dd, 2 * 16, 6 * 16));
+    int jit = 246 + (int)(hash3(vx, vz, 7) & 15);                                 // variacao sutil por vertice
+    vcR[idx] = (unsigned char)mini(255, c[0] * jit >> 8);
+    vcG[idx] = (unsigned char)mini(255, c[1] * jit >> 8);
+    vcB[idx] = (unsigned char)mini(255, c[2] * jit >> 8);
+    vcX[idx] = vx; vcZ[idx] = vz; vcOk[idx] = 1;
+    return idx;
+}
 
 static void draw_terrain(void) {
     int cx = P.x >> 12, cz = P.z >> 12;
     int bx = cx - R_VIEW - 1, bz = cz - R_VIEW - 1;
-    for (int j = 0; j < HW; j++) for (int i = 0; i < HW; i++) Hc[j][i] = world_height(bx + i, bz + j);
-    for (int j = 1; j < HW - 1; j++) for (int i = 1; i < HW - 1; i++) {
-        int sx = (Hc[j][i + 1] - Hc[j][i - 1]) >> 1, sz = (Hc[j + 1][i] - Hc[j - 1][i]) >> 1;
-        int dot = ((-sx * LX - sz * LZ) >> 12) + LY;
-        int len = 4096 + (((sx * sx) >> 12) + ((sz * sz) >> 12)) / 2;
-        int sh = clampi((dot * 4096) / len, 0, 4096);
-        SHc[j][i] = (unsigned char)(56 + ((sh * 199) >> 12));
-        // cor do bioma por vertice: varia de forma CONTINUA com altura/inclinacao -> transicoes suaves (Gouraud)
-        int h = Hc[j][i], slope = maxi(absi(sx), absi(sz));
-        int vx = bx + i, vz = bz + j;
-        int c[3] = { 98, 170, 66 };                                                   // grama
-        mixc(c, 176, 164, 84, (smoothi(h, U(3.5), U(7.0)) * 150) >> 8);               // grama seca em terreno alto
-        mixc(c, 238, 218, 166, 256 - smoothi(h, U(0.3), U(1.4)));                     // areia perto da agua
-        mixc(c, 120, 142, 132, smoothi(-h, 0, U(1.4)));                               // fundo do lago
-        mixc(c, 150, 146, 140, maxi(smoothi(slope, U(0.75), U(1.5)), smoothi(h, U(7.5), U(12))));   // rocha
-        mixc(c, 250, 252, 255, (smoothi(h, U(12), U(16)) * (256 - smoothi(slope, U(1.4), U(2.6)))) >> 8);  // neve
-        int dv = feat_dist16(vx, vz, FEAT_VILLAGE);
-        if (dv < 11 * 16) {
-            mixc(c, 162, 124, 86, (256 - smoothi(dv, 5 * 16, 11 * 16)) * 80 >> 8);    // terra batida ao redor da vila
-            mixc(c, 172, 166, 152, 256 - smoothi(dv, 2 * 16, 4 * 16));                // praca de pedra
-        }
-        int dd = feat_dist16(vx, vz, FEAT_DUNGEON);
-        if (dd < 6 * 16) mixc(c, 150, 118, 84, 256 - smoothi(dd, 2 * 16, 6 * 16));
-        int jit = 246 + (int)(hash3(vx, vz, 7) & 15);                                 // variacao sutil por vertice
-        Tr[j][i] = (unsigned char)mini(255, c[0] * jit >> 8);
-        Tg[j][i] = (unsigned char)mini(255, c[1] * jit >> 8);
-        Tb[j][i] = (unsigned char)mini(255, c[2] * jit >> 8);
-    }
+    int hw = 2 * R_VIEW + 4;                                      // largura REAL da grade (antes era sempre o maximo!)
+    for (int j = 0; j < hw; j++) for (int i = 0; i < hw; i++) Hc[j][i] = world_height(bx + i, bz + j);
     nvis = 0;
     static int wlist[1400], nw; nw = 0;
     int lastTex = -1, lastAlpha = -1;
@@ -352,11 +371,12 @@ static void draw_terrain(void) {
             if (alpha != lastAlpha) { glPolyFmt(POLY_ALPHA(alpha) | POLY_CULL_NONE | POLY_ID(alpha < 31 ? 4 : 1)); lastAlpha = alpha; }
             int uA = (hv & 2) ? 64 : 0, uB = (hv & 2) ? 0 : 64;
             int vA = (hv & 4) ? 64 : 0, vB = (hv & 4) ? 0 : 64;
+            int i00 = vget(b, a, bx, bz), i10 = vget(b, a + 1, bx, bz), i01 = vget(b + 1, a, bx, bz), i11 = vget(b + 1, a + 1, bx, bz);
             glBegin(GL_QUADS);
-            glColor(litrgb(SHc[b][a], Tr[b][a], Tg[b][a], Tb[b][a])); TC(uA, vA); vtx(tx << 12,       h00, tz << 12);
-            glColor(litrgb(SHc[b][a + 1], Tr[b][a + 1], Tg[b][a + 1], Tb[b][a + 1])); TC(uB, vA); vtx((tx + 1) << 12, h10, tz << 12);
-            glColor(litrgb(SHc[b + 1][a + 1], Tr[b + 1][a + 1], Tg[b + 1][a + 1], Tb[b + 1][a + 1])); TC(uB, vB); vtx((tx + 1) << 12, h11, (tz + 1) << 12);
-            glColor(litrgb(SHc[b + 1][a], Tr[b + 1][a], Tg[b + 1][a], Tb[b + 1][a])); TC(uA, vB); vtx(tx << 12,       h01, (tz + 1) << 12);
+            glColor(litrgb(vcSH[i00], vcR[i00], vcG[i00], vcB[i00])); TC(uA, vA); vtx(tx << 12,       h00, tz << 12);
+            glColor(litrgb(vcSH[i10], vcR[i10], vcG[i10], vcB[i10])); TC(uB, vA); vtx((tx + 1) << 12, h10, tz << 12);
+            glColor(litrgb(vcSH[i11], vcR[i11], vcG[i11], vcB[i11])); TC(uB, vB); vtx((tx + 1) << 12, h11, (tz + 1) << 12);
+            glColor(litrgb(vcSH[i01], vcR[i01], vcG[i01], vcB[i01])); TC(uA, vB); vtx(tx << 12,       h01, (tz + 1) << 12);
             glEnd();
         }
     g_nwater = nw;
@@ -852,7 +872,7 @@ static void hud_update(void) {
     put(4, prompt[0] ? prompt : (inDungeon ? "Dungeon" : ((dayf > 2000) ? "Dia" : "Noite")));
     int multi = (msgT > 0 && strchr(msg, '\n'));
     if (!multi) put(5, msgT > 0 ? msg : "");
-    hud_minimap();
+    { static int mmc = 0; if ((mmc++ & 3) == 0) hud_minimap(); }
     put(17, "~agua f mata V vila D dung e");
     put(18, "A atacar  B correr  X arma");
     put(19, "L/R lado  Y agir  SELECT pocao");
@@ -861,7 +881,11 @@ static void hud_update(void) {
         char tmp[120]; strncpy(tmp, msg, 119); tmp[119] = 0; char* l = tmp; int row = 21;
         while (l && row < 24) { char* nl = strchr(l, '\n'); if (nl) *nl = 0; put(row++, l); l = nl ? nl + 1 : 0; }
         put(5, "");
-    } else { put(21, ""); put(22, ""); put(23, ""); }
+    } else {
+        put(21, ""); put(22, "");
+        if (cfg.fps) { snprintf(b, sizeof b, "ms: logica %d  desenho %d  hud %d", profUpd / 33, profRnd / 33, profHud / 33); put(23, b); }
+        else put(23, "");
+    }
 }
 
 // ------------------------------------------------------------------ cenas
@@ -1066,6 +1090,8 @@ static void title_render(void) {
 
 #ifdef HOST_TEST
 // gancho usado apenas pelo teste no PC (tools/host_test.sh): teleporta p/ uma dungeon e volta
+static double hk_t0 = 0;
+static double hk_now(void) { return (double)clock() * 1e6 / CLOCKS_PER_SEC; }
 static void host_test_hook(void) {
     { extern unsigned long g_noise_calls; static unsigned long last; if (frameNo <= 8 || frameNo % 500 == 0) printf("  [f=%d] noise2/frame=%lu\n", frameNo, g_noise_calls - last); last = g_noise_calls; }
     if (frameNo % 1000 == 0) printf("  clamps(v16)=%d nvis=%d\n", g_clamps, nvis);
@@ -1080,11 +1106,14 @@ static void host_test_hook(void) {
     if (frameNo == 1800 && inDungeon) leave_dungeon();
     if (frameNo == 2000) { P.hp = P.maxhp; }
     if (frameNo == 3302 || frameNo == 3338 || frameNo == 3342 || frameNo == 3350) printf("  [menu f=%d] paused=%d inSettings=%d sel=%d  R=%d fps=%d trees=%d monst=%d nuvens=%d sens=%d invY=%d\n", frameNo, paused, inSettings, setSel, gRView, cfg.fps, cfg.trees, cfg.monsters, cfg.clouds, cfg.sens, cfg.invertY);
-    if (frameNo == 1000) gRView = 30;
+    if (frameNo == 1000) { gRView = 30; hk_t0 = hk_now(); }
+    if (frameNo == 1500) printf("  [tempo] R=30: %.0f us/frame\n", (hk_now() - hk_t0) / 500);
     if (frameNo == 1500) { settings_change(2, 2); settings_change(3, 2); settings_change(4, 2); }
     if (frameNo == 2600) { settings_change(2, 2); settings_change(3, 2); settings_change(4, 2); gRView = 14; }
-    if (frameNo == 3200) gRView = 10;
-    if (frameNo == 4000) gRView = 22;
+    if (frameNo == 3200) { gRView = 10; hk_t0 = hk_now(); }
+    if (frameNo == 3299) printf("  [tempo] R=10: %.0f us/frame\n", (hk_now() - hk_t0) / 99);
+    if (frameNo == 4000) { gRView = 22; hk_t0 = hk_now(); }
+    if (frameNo == 4500) printf("  [tempo] R=22: %.0f us/frame\n", (hk_now() - hk_t0) / 500);
 }
 #endif
 
@@ -1144,17 +1173,18 @@ int main(void) {
                 if (keysDown() & KEY_A) { inSettings = 1; settingsFromTitle = 0; setSel = 0; consoleClear(); settings_draw(); }
                 else if (keysDown() & KEY_SELECT) { gstate = ST_TITLE; paused = 0; inDungeon = 0; consoleClear(); title_draw_menu(); }
             } else {
+                u16 pt0 = prof_now();
                 worldTime = (worldTime + 1) % DAY_LEN;
                 update_daylight();
                 if (!inDungeon) build_near_lists();
                 update_player();
                 if (gstate == ST_PLAY) { update_enemies(); update_spawns(); }
-                if (++hudTick >= 6) { hudTick = 0; if (gstate == ST_PLAY) hud_update(); }
+                profUpd = (u16)(prof_now() - pt0);
+                if (++hudTick >= 6) { hudTick = 0; if (gstate == ST_PLAY) { u16 ph = prof_now(); hud_update(); profHud = (u16)(prof_now() - ph); } }
             }
             }
             update_daylight();
-            render_scene();
-            draw_weapon();
+            { u16 pr = prof_now(); render_scene(); draw_weapon(); profRnd = (u16)(prof_now() - pr); }
             if (gstate == ST_DEAD) { consoleClear(); put(8, "      VOCE MORREU"); put(10, "  Pressione A para renascer"); }
             break;
         case ST_DEAD:
