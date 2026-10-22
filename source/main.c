@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include "terrain.h"
 #include "dungeon.h"
 #include "gfx_data.h"
@@ -23,11 +24,12 @@
 #endif
 
 // ------------------------------------------------------------------ configuracao (ajuste aqui)
-#define R_MAX           30          // maximo da distancia de renderizacao (tiles)
+#define R_MAX           26          // maximo da distancia de renderizacao (tiles)  [limite de vertices do DS]
 #define GEO_SHIFT       2           // vertices guardados em escala 1/4 (cabe ate 30 tiles no v16 do DS)
+#define VERT_BUDGET     4200        // vertices "normais" por frame (o DS tem 6144 no total, incluindo os criados pelo recorte da tela)
 #define PITCH_SIGN      1           // se olhar para cima/baixo sair invertido, troque para -1
 #define PITCH_MAX       7200        // limite de inclinacao da camera (~40 graus)
-static int gRView = 22;             // distancia de renderizacao ATUAL (muda em Configuracoes)
+static int gRView = 20;             // distancia de renderizacao ATUAL (muda em Configuracoes)
 #define R_VIEW          gRView
 #define FADE_TILES      (R_VIEW / 4)  // largura do anel que "dissolve" no ceu
 #define HOUSE_3D_DIST   U(8.0)      // abaixo disso a casa vira 3D; acima disso e sprite 2D
@@ -53,12 +55,16 @@ static void wait_vbl(void) { swiWaitForVBlank(); }
 static int fpsShown = 0;
 #ifdef HOST_TEST
 static void fps_init(void) {}
+static void fps_set(int on) { (void)on; }
 static void fps_tick(void) { fpsShown = 60; }
 #else
 #define MY_T3D (*(volatile u16*)0x0400010C)
 #define MY_T3C (*(volatile u16*)0x0400010E)
-static void fps_init(void) { MY_T3C = 0; MY_T3D = 0; MY_T3C = 0x0083; }     // timer 3 livre a ~32,7 kHz
+static int fpsOn = 0;
+static void fps_init(void) {}
+static void fps_set(int on) { fpsOn = on; if (on) { MY_T3C = 0; MY_T3D = 0; MY_T3C = 0x0083; } else MY_T3C = 0; }   // timer 3 so liga com FPS ativo
 static void fps_tick(void) {
+    if (!fpsOn) return;
     static u16 last = 0; static int acc = 0, frames = 0;
     u16 now = MY_T3D; acc += (u16)(now - last); last = now; frames++;
     if (acc >= 32728) { fpsShown = (frames * 32728 + acc / 2) / acc; acc = 0; frames = 0; }
@@ -68,7 +74,7 @@ static int profUpd = 0, profRnd = 0, profHud = 0;            // ticks do timer (
 #ifdef HOST_TEST
 static u16 prof_now(void) { return 0; }
 #else
-static u16 prof_now(void) { return MY_T3D; }
+static u16 prof_now(void) { return fpsOn ? MY_T3D : 0; }
 #endif
 #ifndef HOST_TEST
 #define MY_VCOUNT (*(volatile u16*)0x04000006)
@@ -104,8 +110,8 @@ static Player P;
 typedef struct { int active, type, boss, x, z, hp, maxhp, cd, atk_t, dead_t, anim, hurt_t; } Enemy;
 static Enemy en[MAX_EN];
 
-typedef struct { int fps, trees, monsters, clouds, sens, invertY; } Settings;
-static Settings cfg = { 0, 1, 1, 1, 3, 0 };     // FPS off, arvores on, monstros on, nuvens on, sensibilidade 3, Y normal
+typedef struct { int fps, trees, monsters, clouds, sens, invertY, sky; } Settings;
+static Settings cfg = { 0, 1, 1, 1, 3, 0, 1 };     // FPS off, arvores on, monstros on, nuvens on, sensibilidade 3, Y normal
 
 static int inDungeon = 0;
 static Dungeon dg;
@@ -125,6 +131,12 @@ static void say(const char* s) { strncpy(msg, s, 119); msg[119] = 0; msgT = 220;
 // ------------------------------------------------------------------ texturas
 static int texId[TEX_COUNT];
 static int tsz(int n) { int s = 0, v = 8; while (v < n) { v <<= 1; s++; } return s; }
+static unsigned tex_crc(void) {                       // muda se a tabela de texturas for sobrescrita na RAM
+    unsigned c = 0;
+    for (int i = 0; i < TEX_COUNT; i++) c = c * 31u + (unsigned)(gTexDefs[i].w * 7 + gTexDefs[i].h * 3 + gTexDefs[i].wrap) + (unsigned)texId[i] * 13u + (unsigned)(uintptr_t)gTexDefs[i].data;
+    return c;
+}
+static unsigned texCrc0 = 0; static int texAlert = 0;
 static int texFailed = 0, texFirstFail = -1;
 static void load_textures(void) {
     for (int i = 0; i < TEX_COUNT; i++) {
@@ -139,6 +151,7 @@ static void load_textures(void) {
 #define TC(u, v) glTexCoord2t16(inttot16(u), inttot16(v))
 
 // ------------------------------------------------------------------ camera / vertices
+static int gVerts = 0;                // vertices enviados neste frame (orcamento)
 static int gox, goy, goz;               // origem da vista (f32): vertices sao relativos a ela
 static int gRX, gRZ, gFX, gFZ;          // vetor "direita" e "frente" (4.12)
 #ifdef HOST_TEST
@@ -200,6 +213,7 @@ static void update_daylight(void) {
 
 // ------------------------------------------------------------------ billboards
 static void bb(int tex, int wx, int wy, int wz, int w, int h, int alpha, unsigned short col) {
+    gVerts += 4;
     int hw = w >> 1, ox = (gRX * hw) >> 12, oz = (gRZ * hw) >> 12;
     int tw = gTexDefs[tex].w, th = gTexDefs[tex].h;
     glPolyFmt(POLY_ALPHA(alpha) | POLY_CULL_NONE | POLY_ID(alpha < 31 ? 5 : 2));
@@ -219,6 +233,7 @@ static void quad4(int tex, int alpha, int pid,
                   int x1, int y1, int z1, unsigned short c1, int u1, int v1,
                   int x2, int y2, int z2, unsigned short c2, int u2, int v2,
                   int x3, int y3, int z3, unsigned short c3, int u3, int v3) {
+    gVerts += 4;
     glPolyFmt(POLY_ALPHA(alpha) | POLY_CULL_NONE | POLY_ID(pid));
     glBindTexture(0, texId[tex]);
     glBegin(GL_QUADS);
@@ -361,7 +376,7 @@ static void draw_terrain(void) {
             int rx = (tx << 12) + 2048 - P.x, rz = (tz << 12) + 2048 - P.z;
             int fd = (rx * gFX + rz * gFZ) >> 12;
             int sd = (rx * gRX + rz * gRZ) >> 12;
-            if (fd < -U(2.5) || absi(sd) > fd + U(4.5)) continue;
+            if (fd < -U(2.0) || absi(sd) > fd + U(3.2)) continue;
             if (nvis < 2000) { visTx[nvis] = tx; visTz[nvis] = tz; visD2[nvis] = d2; nvis++; }
             int a = tx - bx, b = tz - bz;
             int h00 = Hc[b][a], h10 = Hc[b][a + 1], h01 = Hc[b + 1][a], h11 = Hc[b + 1][a + 1];
@@ -374,6 +389,7 @@ static void draw_terrain(void) {
             int uA = (hv & 2) ? 64 : 0, uB = (hv & 2) ? 0 : 64;
             int vA = (hv & 4) ? 64 : 0, vB = (hv & 4) ? 0 : 64;
             int i00 = vget(b, a, bx, bz), i10 = vget(b, a + 1, bx, bz), i01 = vget(b + 1, a, bx, bz), i11 = vget(b + 1, a + 1, bx, bz);
+            gVerts += 4;
             glBegin(GL_QUADS);
             glColor(litrgb(vcSH[i00], vcR[i00], vcG[i00], vcB[i00])); TC(uA, vA); vtx(tx << 12,       h00, tz << 12);
             glColor(litrgb(vcSH[i10], vcR[i10], vcG[i10], vcB[i10])); TC(uB, vA); vtx((tx + 1) << 12, h10, tz << 12);
@@ -392,6 +408,7 @@ static void draw_terrain(void) {
             int alpha = mini(18, fade_alpha(visD2[idx]));
             if (alpha != lastA) { glPolyFmt(POLY_ALPHA(alpha) | POLY_CULL_NONE | POLY_ID(3)); lastA = alpha; }
             unsigned short c = litc(230);
+            gVerts += 4;
             glBegin(GL_QUADS);
             glColor(c); TC(anim, 0);       vtx(tx << 12,       SEA_LEVEL, tz << 12);
             glColor(c); TC(anim + 32, 0);  vtx((tx + 1) << 12, SEA_LEVEL, tz << 12);
@@ -427,6 +444,7 @@ static void draw_house3d(int wx, int wy, int wz, int rot) {
     // telhado (piramide)
     int ov = U(0.3); int rx0 = x0 - ov, rx1 = x1 + ov, rz0 = z0 - ov, rz1 = z1 + ov, yb = y1 - U(0.05), ya = y1 + rh;
     int ex[5] = { rx0, rx1, rx1, rx0, rx0 }, ez[5] = { rz0, rz0, rz1, rz1, rz0 };
+    gVerts += 12;
     glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(6));
     glBindTexture(0, texId[TEX_ROOF]);
     for (int f = 0; f < 4; f++) {
@@ -456,9 +474,8 @@ static void draw_entrance3d(int wx, int wy, int wz) {
 
 static void draw_world_objects(void) {
     // arvores (sprites 2D)
-    int budget = 1400 - nvis - g_nwater - 150;           // o DS aguenta ~1536 quads por frame
     for (int pass = 0; pass < 2; pass++)                  // arvores proximas primeiro
-    for (int k = 0; k < nvis && budget > 0 && cfg.trees; k++) {
+    for (int k = 0; k < nvis && gVerts + 4 <= VERT_BUDGET - 700 && cfg.trees; k++) {
         TreeInfo ti;
         if ((visD2[k] < (R_VIEW * R_VIEW) / 4) != (pass == 0)) continue;
         if (!tree_at(visTx[k], visTz[k], &ti)) continue;
@@ -468,7 +485,6 @@ static void draw_world_objects(void) {
         int tex = ti.type == TREE_PINE ? TEX_TREE_PINE : (ti.type == TREE_OAK ? TEX_TREE_OAK : TEX_TREE_DEAD);
         int w = ti.type == TREE_PINE ? U(1.8) : U(2.2), h = ti.type == TREE_PINE ? U(2.9) : U(2.5);
         bb(tex, wx, wy, wz, w, h, alpha, litc(220 + (int)((ti.ox >> 4) & 31)));
-        budget--;
     }
     // vilas
     for (int i = 0; i < nnearH; i++) {
@@ -556,6 +572,7 @@ static void draw_enemies(void) {
 #define ATK_LEN_SWORD 21
 #define ATK_LEN_FIST  15
 static void draw_overlay_quad(int tex, int x0, int y0, int x1, int y1, int alpha, unsigned short col, int pid) {
+    gVerts += 4;
     int tw = tex >= 0 ? gTexDefs[tex].w : 0, th = tex >= 0 ? gTexDefs[tex].h : 0;
     glPolyFmt(POLY_ALPHA(alpha) | POLY_CULL_NONE | POLY_ID(pid));
     if (tex >= 0) glBindTexture(0, texId[tex]); else glBindTexture(0, 0);
@@ -879,13 +896,14 @@ static void hud_update(void) {
     put(18, "A atacar  B correr  X arma");
     put(19, "L/R lado  Y agir  SELECT pocao");
     put(20, "START pausa  Tela: olhar");
+    if (texAlert) put(19, "ALERTA: tab. texturas mudou!");
     if (multi) {   // mensagens multilinha (dialogos)
         char tmp[120]; strncpy(tmp, msg, 119); tmp[119] = 0; char* l = tmp; int row = 21;
         while (l && row < 24) { char* nl = strchr(l, '\n'); if (nl) *nl = 0; put(row++, l); l = nl ? nl + 1 : 0; }
         put(5, "");
     } else {
         put(21, ""); put(22, "");
-        if (cfg.fps) { snprintf(b, sizeof b, "ms: logica %d  desenho %d  hud %d", profUpd / 33, profRnd / 33, profHud / 33); put(23, b); }
+        if (cfg.fps) { snprintf(b, sizeof b, "ms L%d D%d H%d  vert %d", profUpd / 33, profRnd / 33, profHud / 33, gVerts); put(23, b); }
         else put(23, "");
     }
 }
@@ -903,6 +921,7 @@ static void sky_quad(int tex, int dx, int dy, int dz, int D, int hw, int hh, int
     int cx = (dx * D) >> 12, cy = (dy * D) >> 12, cz = (dz * D) >> 12;
     int rwx = (rx * hw) >> 12, rwz = (rz * hw) >> 12;
     int uhx = (ux * hh) >> 12, uhy = (uy * hh) >> 12, uhz = (uz * hh) >> 12;
+    gVerts += 4;
     int tw = gTexDefs[tex].w, th = gTexDefs[tex].h;
     glPolyFmt(POLY_ALPHA(alpha) | POLY_CULL_NONE | POLY_ID(pid));
     glBindTexture(0, texId[tex]);
@@ -925,8 +944,8 @@ static void draw_sky(void) {
     int ang = (worldTime * 32768 / DAY_LEN) & 0x7FFF;             // mesma fase do ciclo dia/noite
     int ca = cosLerp(ang), sa = sinLerp(ang);
     int sdx = (ca * 3900) >> 12, sdy = (sa * 3900) >> 12, sdz = 1250;   // sol: nasce a leste (+x), poe a oeste, inclinado p/ sul
-    if (sdy > -250) sky_quad(TEX_SUN, sdx, sdy, sdz, D, (D * 300) >> 12, (D * 300) >> 12, 31, RGB15(31, 31, 31), 7);
-    if (-sdy > -250) sky_quad(TEX_MOON, -sdx, -sdy, -sdz, D, (D * 240) >> 12, (D * 240) >> 12, 31, RGB15(31, 31, 31), 8);
+    if (cfg.sky && sdy > -250) sky_quad(TEX_SUN, sdx, sdy, sdz, D, (D * 300) >> 12, (D * 300) >> 12, 31, RGB15(31, 31, 31), 7);
+    if (cfg.sky && -sdy > -250) sky_quad(TEX_MOON, -sdx, -sdy, -sdz, D, (D * 240) >> 12, (D * 240) >> 12, 31, RGB15(31, 31, 31), 8);
     if (cfg.clouds) {
         static int init = 0, caz[18], cel[18], csz[18];
         if (!init) {
@@ -959,6 +978,7 @@ static void set_sky(void) {
 }
 
 static void render_scene(void) {
+    gVerts = 0;
     setup_camera();
     set_sky();
     if (inDungeon) { draw_dungeon(); draw_enemies(); }
@@ -979,7 +999,7 @@ static void new_game(void) {
 // ------------------------------------------------------------------ titulo
 // ------------------------------------------------------------------ configuracoes
 static int inSettings = 0, settingsFromTitle = 0, setSel = 0;
-#define NSET 8
+#define NSET 9
 static void title_draw_menu(void);
 static void pause_draw(void) {
     consoleClear();
@@ -993,21 +1013,22 @@ static void settings_draw(void) {
     snprintf(b, sizeof b, "%c Arvores            %s", setSel == 2 ? '>' : ' ', cfg.trees ? "SIM" : "NAO"); put(7, b);
     snprintf(b, sizeof b, "%c Monstros (mundo)   %s", setSel == 3 ? '>' : ' ', cfg.monsters ? "SIM" : "NAO"); put(9, b);
     snprintf(b, sizeof b, "%c Nuvens             %s", setSel == 4 ? '>' : ' ', cfg.clouds ? "SIM" : "NAO"); put(11, b);
-    snprintf(b, sizeof b, "%c Sensib. camera     %d", setSel == 5 ? '>' : ' ', cfg.sens); put(13, b);
-    snprintf(b, sizeof b, "%c Inverter eixo Y    %s", setSel == 6 ? '>' : ' ', cfg.invertY ? "SIM" : "NAO"); put(15, b);
-    snprintf(b, sizeof b, "%c Voltar", setSel == 7 ? '>' : ' '); put(17, b);
-    put(20, "Cima/Baixo: escolher   B: sair"); put(21, "Esq/Dir ou A: mudar  (dungeon");
-    put(22, "sempre tem monstros)");
+    snprintf(b, sizeof b, "%c Sol e lua          %s", setSel == 5 ? '>' : ' ', cfg.sky ? "SIM" : "NAO"); put(13, b);
+    snprintf(b, sizeof b, "%c Sensib. camera     %d", setSel == 6 ? '>' : ' ', cfg.sens); put(15, b);
+    snprintf(b, sizeof b, "%c Inverter eixo Y    %s", setSel == 7 ? '>' : ' ', cfg.invertY ? "SIM" : "NAO"); put(17, b);
+    snprintf(b, sizeof b, "%c Voltar", setSel == 8 ? '>' : ' '); put(19, b);
+    put(21, "Cima/Baixo: escolher  B: sair"); put(22, "Esq/Dir ou A: mudar");
 }
 static void settings_change(int i, int act) {            // act: -1 esquerda, +1 direita, 2 = A
     switch (i) {
     case 0: gRView += (act == -1) ? -2 : 2; if (gRView > R_MAX) gRView = (act == 2) ? 10 : R_MAX; if (gRView < 10) gRView = 10; break;
-    case 1: cfg.fps ^= 1; break;
+    case 1: cfg.fps ^= 1; fps_set(cfg.fps); break;
     case 2: cfg.trees ^= 1; break;
     case 3: cfg.monsters ^= 1; if (!cfg.monsters && !inDungeon) memset(en, 0, sizeof en); break;
     case 4: cfg.clouds ^= 1; break;
-    case 5: cfg.sens += (act == -1) ? -1 : 1; if (cfg.sens > 5) cfg.sens = (act == 2) ? 1 : 5; if (cfg.sens < 1) cfg.sens = 1; break;
-    case 6: cfg.invertY ^= 1; break;
+    case 5: cfg.sky ^= 1; break;
+    case 6: cfg.sens += (act == -1) ? -1 : 1; if (cfg.sens > 5) cfg.sens = (act == 2) ? 1 : 5; if (cfg.sens < 1) cfg.sens = 1; break;
+    case 7: cfg.invertY ^= 1; break;
     }
 }
 static void settings_exit(void) {
@@ -1023,10 +1044,10 @@ static void settings_update(void) {
     if (down & KEY_A) act = 2;
     if (down & KEY_TOUCH) {
         touchPosition t; touchRead(&t); int row = t.py / 8;
-        if (row >= 3 && row <= 18) { setSel = (row - 3) / 2; act = 2; }
+        if (row >= 3 && row <= 20) { setSel = (row - 3) / 2; act = 2; }
     }
     if (down & (KEY_B | KEY_START)) { settings_exit(); return; }
-    if (act) { if (setSel == 7) { settings_exit(); return; } settings_change(setSel, act); }
+    if (act) { if (setSel == 8) { settings_exit(); return; } settings_change(setSel, act); }
     if (down) settings_draw();
 }
 
@@ -1083,7 +1104,7 @@ static void title_render(void) {
     P.yaw = (tt * 20) & 0x7FFF; P.ground = world_height_at(P.x, P.z); P.y = P.ground + U(1.5);
     inDungeon = 0; dayf = 4096; ambR = ambG = ambB = 256; frameNo++;
     build_near_lists();
-    P.pitch = 1500;
+    gVerts = 0; P.pitch = 1500;
     setup_camera(); set_sky(); draw_sky();
     draw_terrain(); draw_world_objects();
     draw_logo();
@@ -1108,7 +1129,7 @@ static void host_test_hook(void) {
     if (frameNo == 1800 && inDungeon) leave_dungeon();
     if (frameNo == 2000) { P.hp = P.maxhp; }
     if (frameNo == 3302 || frameNo == 3338 || frameNo == 3342 || frameNo == 3350) printf("  [menu f=%d] paused=%d inSettings=%d sel=%d  R=%d fps=%d trees=%d monst=%d nuvens=%d sens=%d invY=%d\n", frameNo, paused, inSettings, setSel, gRView, cfg.fps, cfg.trees, cfg.monsters, cfg.clouds, cfg.sens, cfg.invertY);
-    if (frameNo == 1000) { gRView = 30; hk_t0 = hk_now(); }
+    if (frameNo == 1000) { gRView = R_MAX; hk_t0 = hk_now(); }
     if (frameNo == 1500) printf("  [tempo] R=30: %.0f us/frame\n", (hk_now() - hk_t0) / 500);
     if (frameNo == 1500) { settings_change(2, 2); settings_change(3, 2); settings_change(4, 2); }
     if (frameNo == 2600) { settings_change(2, 2); settings_change(3, 2); settings_change(4, 2); gRView = 14; }
@@ -1151,6 +1172,7 @@ int main(void) {
         while (1) wait_vbl();
     }
     load_textures();
+    texCrc0 = tex_crc();
     { char tb[40]; if (texFailed) snprintf(tb, sizeof tb, "3/4 texturas: %d FALHARAM (1a=%d)", texFailed, texFirstFail); else snprintf(tb, sizeof tb, "3/4 texturas ok (%d)", TEX_COUNT); put(3, tb); }
     world_init(SEED);
     put(4, "4/4 mundo ok");
@@ -1164,6 +1186,13 @@ int main(void) {
     while (1) {
         scanKeys();
         frameNo++;
+        if ((frameNo & 31) == 0 && tex_crc() != texCrc0) texAlert = 1;
+        {   // diagnostico: segurar L+R (titulo ou pausa) recarrega todas as texturas na VRAM
+            int hh = keysHeld(); static int lr = 0;
+            if ((hh & KEY_L) && (hh & KEY_R) && (gstate == ST_TITLE || paused)) {
+                if (!lr) { lr = 1; glResetTextures(); texFailed = 0; texFirstFail = -1; load_textures(); texCrc0 = tex_crc(); texAlert = 0; put(21, "texturas recarregadas"); }
+            } else lr = 0;
+        }
 #ifdef HOST_TEST
         host_test_hook();
 #endif
