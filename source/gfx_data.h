@@ -43,6 +43,7 @@ enum {
     TEX_FIST0,
     TEX_FIST1,
     TEX_FIST2,
+    TEX_TORCH,
     TEX_SUN,
     TEX_MOON,
     TEX_CLOUD0,
@@ -53,7 +54,7 @@ enum {
 };
 extern const TexDef gTexDefs[TEX_COUNT];
 extern const unsigned gfx_stamp;
-#define GFX_STAMP 0xFD142661u
+#define GFX_STAMP 0xC84C76D5u
 // cores medias dos biomas (calculadas das texturas de chao)
 #define TINT_GRASS_R 72
 #define TINT_GRASS_G 107

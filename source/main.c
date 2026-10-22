@@ -196,6 +196,10 @@ static unsigned short lit(int sh, int tint) {          // sh,tint 0..256 -> cor 
     return RGB15(mini(r, 31), mini(g, 31), mini(b, 31));
 }
 static unsigned short litc(int sh) { return lit(sh, 256); }
+static unsigned short litrgbT(int sh, int tr, int tg, int tb, int tl) {       // como litrgb, com luz extra (tocha) tl 0..256
+    int r = (31 * sh * tr * (ambR + tl)) >> 24, g = (31 * sh * tg * (ambG + ((tl * 3) >> 2))) >> 24, b = (31 * sh * tb * (ambB + (tl >> 1))) >> 24;
+    return RGB15(mini(r, 31), mini(g, 31), mini(b, 31));
+}
 static unsigned short litrgb(int sh, int tr, int tg, int tb) {       // sombreamento * cor do bioma * luz ambiente
     int r = (31 * sh * tr * ambR) >> 24, g = (31 * sh * tg * ambG) >> 24, b = (31 * sh * tb * ambB) >> 24;
     return RGB15(mini(r, 31), mini(g, 31), mini(b, 31));
@@ -212,8 +216,23 @@ static void update_daylight(void) {
 }
 
 // ------------------------------------------------------------------ billboards
+// ---- luz da tocha (arma 2): ilumina o mundo (mais forte a noite) e as dungeons
+static int torch_level(int wx, int wz) {
+    if (P.weapon != 2) return 0;
+    int dx = wx - P.x, dz = wz - P.z, R = U(9) + ((frameNo >> 1) & 7) * 60;     // raio com leve tremulacao
+    if (dx > R || dx < -R || dz > R || dz < -R) return 0;
+    int d = adist(dx, dz); if (d >= R) return 0;
+    int t = 256 - (d * 256) / R;
+    return (t * t) >> 8;
+}
+static unsigned short tboost(unsigned short c, int wx, int wz) {              // soma luz quente a uma cor 15 bits
+    int tl = torch_level(wx, wz); if (!tl) return c;
+    int r = (c & 31) + ((tl * 16) >> 8), g = ((c >> 5) & 31) + ((tl * 11) >> 8), b = ((c >> 10) & 31) + ((tl * 5) >> 8);
+    return RGB15(mini(r, 31), mini(g, 31), mini(b, 31));
+}
 static void bb(int tex, int wx, int wy, int wz, int w, int h, int alpha, unsigned short col) {
     gVerts += 4;
+    if (P.weapon == 2 && !inDungeon) col = tboost(col, wx, wz);
     int hw = w >> 1, ox = (gRX * hw) >> 12, oz = (gRZ * hw) >> 12;
     int tw = gTexDefs[tex].w, th = gTexDefs[tex].h;
     glPolyFmt(POLY_ALPHA(alpha) | POLY_CULL_NONE | POLY_ID(alpha < 31 ? 5 : 2));
@@ -234,6 +253,7 @@ static void quad4(int tex, int alpha, int pid,
                   int x2, int y2, int z2, unsigned short c2, int u2, int v2,
                   int x3, int y3, int z3, unsigned short c3, int u3, int v3) {
     gVerts += 4;
+    if (P.weapon == 2 && !inDungeon) { c0 = tboost(c0, x0, z0); c1 = tboost(c1, x1, z1); c2 = tboost(c2, x2, z2); c3 = tboost(c3, x3, z3); }
     glPolyFmt(POLY_ALPHA(alpha) | POLY_CULL_NONE | POLY_ID(pid));
     glBindTexture(0, texId[tex]);
     glBegin(GL_QUADS);
@@ -389,12 +409,14 @@ static void draw_terrain(void) {
             int uA = (hv & 2) ? 64 : 0, uB = (hv & 2) ? 0 : 64;
             int vA = (hv & 4) ? 64 : 0, vB = (hv & 4) ? 0 : 64;
             int i00 = vget(b, a, bx, bz), i10 = vget(b, a + 1, bx, bz), i01 = vget(b + 1, a, bx, bz), i11 = vget(b + 1, a + 1, bx, bz);
+            int t00 = torch_level(tx << 12, tz << 12), t10 = torch_level((tx + 1) << 12, tz << 12);
+            int t01 = torch_level(tx << 12, (tz + 1) << 12), t11 = torch_level((tx + 1) << 12, (tz + 1) << 12);
             gVerts += 4;
             glBegin(GL_QUADS);
-            glColor(litrgb(vcSH[i00], vcR[i00], vcG[i00], vcB[i00])); TC(uA, vA); vtx(tx << 12,       h00, tz << 12);
-            glColor(litrgb(vcSH[i10], vcR[i10], vcG[i10], vcB[i10])); TC(uB, vA); vtx((tx + 1) << 12, h10, tz << 12);
-            glColor(litrgb(vcSH[i11], vcR[i11], vcG[i11], vcB[i11])); TC(uB, vB); vtx((tx + 1) << 12, h11, (tz + 1) << 12);
-            glColor(litrgb(vcSH[i01], vcR[i01], vcG[i01], vcB[i01])); TC(uA, vB); vtx(tx << 12,       h01, (tz + 1) << 12);
+            glColor(litrgbT(vcSH[i00], vcR[i00], vcG[i00], vcB[i00], t00)); TC(uA, vA); vtx(tx << 12,       h00, tz << 12);
+            glColor(litrgbT(vcSH[i10], vcR[i10], vcG[i10], vcB[i10], t10)); TC(uB, vA); vtx((tx + 1) << 12, h10, tz << 12);
+            glColor(litrgbT(vcSH[i11], vcR[i11], vcG[i11], vcB[i11], t11)); TC(uB, vB); vtx((tx + 1) << 12, h11, (tz + 1) << 12);
+            glColor(litrgbT(vcSH[i01], vcR[i01], vcG[i01], vcB[i01], t01)); TC(uA, vB); vtx(tx << 12,       h01, (tz + 1) << 12);
             glEnd();
         }
     g_nwater = nw;
@@ -519,7 +541,8 @@ static void draw_world_objects(void) {
 static unsigned short dg_light(int wx, int wz) {
     int d = adist(wx - P.x, wz - P.z);
     int fl = (frameNo & 8) ? 1 : 0;
-    int v = 31 - (d * 31) / U(9.5) + fl;
+    int rad = (P.weapon == 2) ? U(15) + ((frameNo >> 1) & 7) * 60 : U(7);
+    int v = 31 - (d * 31) / rad + fl;
     v = clampi(v, 1, 31);
     return RGB15(v, (v * 28) >> 5, (v * 20) >> 5);
 }
@@ -571,6 +594,33 @@ static void draw_enemies(void) {
 // ------------------------------------------------------------------ overlay 2D (arma, tela vermelha, logo)
 #define ATK_LEN_SWORD 21
 #define ATK_LEN_FIST  15
+#define ATK_LEN_TORCH 18
+static int atk_len(void) { return P.weapon == 0 ? ATK_LEN_FIST : (P.weapon == 1 ? ATK_LEN_SWORD : ATK_LEN_TORCH); }
+static const char* const WNAME[3] = { "Punhos", "Espada", "Tocha" };
+static int c16(int v) { return v > 32700 ? 32700 : (v < -32700 ? -32700 : v); }
+static void draw_torch_overlay(void) {                 // tocha em 1a pessoa: inclinada, balanca ao andar, gira no ataque
+    int deg = 12;
+    if (P.atk_t > 0) {
+        int p = (P.atk_t * 100) / ATK_LEN_TORCH;
+        if (p < 30) deg = 12 + p; else if (p < 65) deg = 42 - (75 * (p - 30)) / 35; else deg = -33 + (45 * (p - 65)) / 35;
+    }
+    int ang = (deg * 91) & 0x7FFF, ca = cosLerp(ang), sa = sinLerp(ang);
+    int bobx = (sinLerp((P.bob * 700) & 0x7FFF) * 6) >> 12, boby = (absi(cosLerp((P.bob * 700) & 0x7FFF)) * 5) >> 12;
+    int px = 13517 + bobx * 40, py = -25395 + boby * 40;                 // base do cabo (v16): canto inferior direito
+    int hw = 7168, H = 28672;                                            // 32x64 texels -> 3,5 x 7 unidades
+    int lx[4] = { -hw, hw, hw, -hw }, ly[4] = { 0, 0, H, H }, tu[4] = { 0, 32, 32, 0 }, tv[4] = { 64, 64, 0, 0 };
+    gVerts += 4;
+    glPolyFmt(POLY_ALPHA(31) | POLY_CULL_NONE | POLY_ID(10));
+    glBindTexture(0, texId[TEX_TORCH]);
+    glColor(RGB15(31, 31, 31));                                           // a tocha brilha por si so
+    glBegin(GL_QUADS);
+    for (int k = 0; k < 4; k++) {
+        int X = px + ((lx[k] * ca - ly[k] * sa) >> 12), Y = py + ((lx[k] * sa + ly[k] * ca) >> 12);
+        glTexCoord2t16(inttot16(tu[k]), inttot16(tv[k]));
+        glVertex3v16(c16(X), c16(Y), 4000);
+    }
+    glEnd();
+}
 static void draw_overlay_quad(int tex, int x0, int y0, int x1, int y1, int alpha, unsigned short col, int pid) {
     gVerts += 4;
     int tw = tex >= 0 ? gTexDefs[tex].w : 0, th = tex >= 0 ? gTexDefs[tex].h : 0;
@@ -590,6 +640,11 @@ static void begin_overlay(void) {
 }
 static void draw_weapon(void) {
     begin_overlay();
+    if (P.weapon == 2) {
+        draw_torch_overlay();
+        if (P.hurt_t > 0) draw_overlay_quad(-1, -32000, -24500, 32000, 24500, 9, RGB15(31, 0, 0), 11);
+        return;
+    }
     int tex, len = P.weapon ? ATK_LEN_SWORD : ATK_LEN_FIST;
     int idx = 0;
     if (P.atk_t > 0) idx = 1 + ((P.atk_t - 1) * (P.weapon ? 3 : 2)) / len;
@@ -683,8 +738,8 @@ static void update_enemies(void) {
     }
 }
 static void player_attack_hit(void) {
-    int dmg_lo = P.weapon ? 8 : 2, dmg_hi = P.weapon ? 14 : 5;
-    int range = P.weapon ? U(1.9) : U(1.4);
+    int dmg_lo = P.weapon == 1 ? 8 : (P.weapon == 2 ? 3 : 2), dmg_hi = P.weapon == 1 ? 14 : (P.weapon == 2 ? 7 : 5);
+    int range = P.weapon == 1 ? U(1.9) : (P.weapon == 2 ? U(1.6) : U(1.4));
     int hit = 0;
     for (int i = 0; i < MAX_EN; i++) {
         Enemy* e = &en[i]; if (!e->active || e->dead_t) continue;
@@ -780,10 +835,10 @@ static void update_player(void) {
     if (inDungeon) { P.ground = 0; P.y = EYE; }
     else { P.ground = world_height_at(P.x, P.z); int target = P.ground + EYE; P.y += (target - P.y) >> 2; }
     // trocar arma / pocao
-    if (down & KEY_X) { P.weapon ^= 1; say(P.weapon ? "Espada equipada" : "Punhos livres"); }
+    if (down & KEY_X) { P.weapon = (P.weapon + 1) % 3; say(P.weapon == 0 ? "Punhos livres" : (P.weapon == 1 ? "Espada equipada" : "Tocha acesa")); }
     if ((down & KEY_SELECT) && P.potions > 0 && P.hp < P.maxhp) { P.potions--; P.hp = mini(P.maxhp, P.hp + 40); say("Voce bebeu uma pocao (+40)"); }
     // ataque
-    int len = P.weapon ? ATK_LEN_SWORD : ATK_LEN_FIST;
+    int len = atk_len();
     if ((down & KEY_A) && P.atk_t == 0) P.atk_t = 1;
     else if (P.atk_t > 0) {
         P.atk_t++;
@@ -887,7 +942,7 @@ static void hud_update(void) {
     char bar[13]; for (int i = 0; i < 12; i++) bar[i] = i < bars ? '#' : '-'; bar[12] = 0;
     snprintf(b, sizeof b, "PV [%s] %d/%d", bar, P.hp, P.maxhp); put(1, b);
     snprintf(b, sizeof b, "XP %d/%d  Ouro %d  Pocoes %d", P.xp, 40 * P.level, P.gold, P.potions); put(2, b);
-    snprintf(b, sizeof b, "%s  Dir %s  Abates %d", P.weapon ? "Espada" : "Punhos", compass(), P.kills); put(3, b);
+    snprintf(b, sizeof b, "%s  Dir %s  Abates %d", WNAME[P.weapon], compass(), P.kills); put(3, b);
     put(4, prompt[0] ? prompt : (inDungeon ? "Dungeon" : ((dayf > 2000) ? "Dia" : "Noite")));
     int multi = (msgT > 0 && strchr(msg, '\n'));
     if (!multi) put(5, msgT > 0 ? msg : "");
