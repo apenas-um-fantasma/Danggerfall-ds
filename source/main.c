@@ -19,6 +19,7 @@
 #include "terrain.h"
 #include "dungeon.h"
 #include "gfx_data.h"
+#include "ui_data.h"
 #ifdef HOST_TEST
 #include <time.h>
 #endif
@@ -116,6 +117,7 @@ static Settings cfg = { 0, 1, 1, 1, 3, 0, 1 };     // FPS off, arvores on, monst
 static int inDungeon = 0;
 static Dungeon dg;
 static unsigned char dgOpened[DG_MAX_CH];
+static unsigned char dgSeen[DG_H][DG_W];                 // neblina da dungeon (celulas ja vistas)
 static int ow_x, ow_z, ow_yaw;          // posicao no mundo antes de entrar na dungeon
 static unsigned curDgSeed;
 
@@ -772,7 +774,7 @@ static void enter_dungeon(const Feature* f) {
     ow_x = P.x; ow_z = P.z; ow_yaw = P.yaw;
     curDgSeed = f->seed;
     dungeon_generate(&dg, f->seed);
-    memset(dgOpened, 0, sizeof dgOpened);
+    memset(dgOpened, 0, sizeof dgOpened); memset(dgSeen, 0, sizeof dgSeen);
     memset(en, 0, sizeof en);
     inDungeon = 1;
     P.x = dg.sx * DG_C + DG_C / 2; P.z = dg.sz * DG_C + DG_C / 2; P.y = EYE;
@@ -889,79 +891,151 @@ static void update_spawns(void) {
 }
 
 // ------------------------------------------------------------------ texto (tela de baixo)
-static void put(int row, const char* s) { iprintf("\x1b[%d;0H%-32s", row, s); }
+// ------------------------------------------------------------------ TELA DE BAIXO em software
+// Bitmap de 8 bits 256x192 (bancos H+I = 48 KB). Todo o texto, o HUD e o radar sao desenhados num buffer em RAM
+// e copiados para a VRAM quando algo muda. Modo 0 = menus (fundo azul), modo 1 = HUD (pergaminho + radar).
+static u16 fb16[256 * 96];
+static u8* fb = (u8*)fb16;
+static u16* subVram = 0;
+static int uiDirty = 1, uiMode = 0, hudForce = 1;
+#ifdef HOST_TEST
+static u16 host_vram[256 * 96];
+#endif
 
-static void hud_minimap(void) {
-    char line[34];
-    if (inDungeon) {
-        int pcx = floordiv(P.x, DG_C), pcz = floordiv(P.z, DG_C);
-        for (int r = 0; r < 11; r++) {
-            for (int c = 0; c < 31; c++) {
-                int cx = pcx + c - 15, cz = pcz + r - 5;
-                char ch = ' ';
-                if (cx >= 0 && cz >= 0 && cx < DG_W && cz < DG_H) ch = dg.cell[cz][cx] ? '.' : '#';
-                if (cx == dg.sx && cz == dg.sz) ch = '<';
-                line[c] = ch;
-            }
-            line[31] = 0;
-            for (int i = 0; i < dg.nch; i++) { int c = dg.ch[i].cx - pcx + 15, rr = dg.ch[i].cz - pcz + 5; if (rr == r && c >= 0 && c < 31 && !dgOpened[i]) line[c] = '$'; }
-            for (int i = 0; i < MAX_EN; i++) if (en[i].active && !en[i].dead_t) { int c = floordiv(en[i].x, DG_C) - pcx + 15, rr = floordiv(en[i].z, DG_C) - pcz + 5; if (rr == r && c >= 0 && c < 31) line[c] = en[i].boss ? 'B' : 'e'; }
-            if (r == 5) line[15] = '@';
-            put(6 + r, line);
-        }
-        return;
-    }
-    int cx = P.x >> 12, cz = P.z >> 12;
-    for (int r = 0; r < 11; r++) {
-        for (int c = 0; c < 31; c++) { char ch = (char)world_biome_char(cx + (c - 15) * 3, cz + (r - 5) * 3); if (ch == 'f' && !cfg.trees) ch = '.'; line[c] = ch; }
-        line[31] = 0;
-        for (int i = 0; i < nnearF; i++) {
-            int c = (nearF[i].cx - cx + (nearF[i].cx - cx >= 0 ? 1 : -1)) / 3 + 15, rr = (nearF[i].cz - cz + (nearF[i].cz - cz >= 0 ? 1 : -1)) / 3 + 5;
-            if (rr == r && c >= 0 && c < 31) line[c] = nearF[i].type == FEAT_VILLAGE ? 'V' : 'D';
-        }
-        for (int i = 0; i < MAX_EN; i++) if (en[i].active && !en[i].dead_t) {
-            int c = ((en[i].x >> 12) - cx) / 3 + 15, rr = ((en[i].z >> 12) - cz) / 3 + 5;
-            if (rr == r && c >= 0 && c < 31) line[c] = 'e';
-        }
-        if (r == 5) line[15] = '@';
-        put(6 + r, line);
+static void ui_init(void) {
+    videoSetModeSub(MODE_5_2D | DISPLAY_BG3_ACTIVE);
+    vramSetBankH(VRAM_H_SUB_BG); vramSetBankI(VRAM_I_SUB_BG);          // 32 KB + 16 KB contiguos = 256x192 em 8 bits
+    int bg = bgInitSub(3, BgType_Bmp8, BgSize_B8_256x256, 0, 0);
+    subVram = (u16*)bgGetGfxPtr(bg);
+    for (int i = 0; i < 256; i++) BG_PALETTE_SUB[i] = ui_palette[i];
+    memset(fb, UI_BG, 256 * 192); uiDirty = 1;
+}
+static void ui_flush(void) {                              // a VRAM so aceita escritas de 16/32 bits
+    if (!subVram || !uiDirty) return;
+    for (int i = 0; i < 256 * 96; i++) subVram[i] = fb16[i];
+    uiDirty = 0;
+}
+static void ui_clear(void) { memset(fb, UI_BG, 256 * 192); uiMode = 0; uiDirty = 1; hudForce = 1; }
+static void ui_char(int x, int y, int c, int col) {
+    if (c < 32 || c > 127) c = '?';
+    const u8* g = ui_font[c - 32];
+    for (int r = 0; r < 8; r++) {
+        int yy = y + r; if ((unsigned)yy >= 192) continue;
+        int bits = g[r];
+        for (int k = 0; k < 6; k++) if (bits & (0x20 >> k)) { int xx = x + k; if ((unsigned)xx < 256) fb[yy * 256 + xx] = (u8)col; }
     }
 }
+static void ui_text(int x, int y, const char* s, int col, int pitch) { for (; *s; s++, x += pitch) ui_char(x, y, (unsigned char)*s, col); }
+static void ui_rect(int x0, int y0, int x1, int y1, int col) {
+    for (int y = y0; y <= y1; y++) { if ((unsigned)y >= 192) continue; for (int x = x0; x <= x1; x++) if ((unsigned)x < 256) fb[y * 256 + x] = (u8)col; }
+}
+static void put(int row, const char* s) {                 // linha de texto de MENU (8 px de altura, fundo azul)
+    int y = row * 8; if (y < 0 || y > 184) return;
+    memset(fb + y * 256, UI_BG, 8 * 256);
+    ui_text(0, y, s, UI_WHITE, 8);
+    uiMode = 0; uiDirty = 1;
+}
 
+// ---- radar
+static void ui_pixm(int x, int y, int col) {              // pixel limitado a area do mapa (e fora da bussola)
+    if (x < UI_MAP_X0 || x > UI_MAP_X1 || y < UI_MAP_Y0 || y > UI_MAP_Y1) return;
+    if (x >= UI_CMP_X0 && y >= UI_CMP_Y0) return;
+    fb[y * 256 + x] = (u8)col;
+}
+static void ui_icon(int ic, int cx, int cy) {
+    const UiIcon* I = &ui_icons[ic];
+    int x0 = cx - I->w / 2, y0 = cy - I->h / 2;
+    for (int y = 0; y < I->h; y++) for (int x = 0; x < I->w; x++) { int p = I->px[y * I->w + x]; if (p != 255) ui_pixm(x0 + x, y0 + y, p); }
+}
+static void ui_arrow(int cx, int cy) {                    // seta do jogador, aponta para onde ele olha (norte = cima)
+    int a = P.yaw & 0x7FFF, fx = sinLerp(a) >> 4, fz = (-cosLerp(a)) >> 4;      // 4.8
+    int rx = -fz, rz = fx;
+    int ax = cx * 256 + fx * 6,                       ay = cy * 256 + fz * 6;
+    int bx = cx * 256 - fx * 7 / 2 + rx * 18 / 5,     by = cy * 256 - fz * 7 / 2 + rz * 18 / 5;
+    int ex = cx * 256 - fx * 7 / 2 - rx * 18 / 5,     ey = cy * 256 - fz * 7 / 2 - rz * 18 / 5;
+    for (int y = cy - 7; y <= cy + 7; y++) for (int x = cx - 7; x <= cx + 7; x++) {
+        int px = x * 256 + 128, py = y * 256 + 128;
+        int d1 = (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+        int d2 = (ex - bx) * (py - by) - (ey - by) * (px - bx);
+        int d3 = (ax - ex) * (py - ey) - (ay - ey) * (px - ex);
+        if ((d1 >= 0 && d2 >= 0 && d3 >= 0) || (d1 <= 0 && d2 <= 0 && d3 <= 0)) ui_pixm(x, y, UI_RED);
+    }
+    ui_pixm(cx, cy, UI_WHITE);
+}
+static void ui_radar(void) {
+    int cx = (UI_MAP_X0 + UI_MAP_X1) / 2, cy = (UI_MAP_Y0 + UI_MAP_Y1) / 2;
+    if (inDungeon) {
+        const int S = 5;                                                   // px por celula
+        int pcx = floordiv(P.x, DG_C), pcz = floordiv(P.z, DG_C);
+        for (int z = pcz - 5; z <= pcz + 5; z++) for (int x = pcx - 5; x <= pcx + 5; x++) if (dg_floor(&dg, x, z)) dgSeen[z][x] = 1;
+        for (int z = 0; z < DG_H; z++) for (int x = 0; x < DG_W; x++) {
+            if (!dgSeen[z][x]) continue;
+            int sx = cx + floordiv((x * DG_C - P.x) * S, DG_C), sy = cy + floordiv((z * DG_C - P.z) * S, DG_C);
+            for (int yy = 0; yy < S; yy++) for (int xx = 0; xx < S; xx++) ui_pixm(sx + xx, sy + yy, UI_FLOOR);
+        }
+        #define DGX(wx) (cx + floordiv(((wx) - P.x) * S, DG_C))
+        #define DGY(wz) (cy + floordiv(((wz) - P.z) * S, DG_C))
+        ui_icon(ICON_DUNGEON, DGX(dg.sx * DG_C + DG_C / 2), DGY(dg.sz * DG_C + DG_C / 2));
+        for (int i = 0; i < dg.nch; i++) if (!dgOpened[i] && dgSeen[dg.ch[i].cz][dg.ch[i].cx])
+            ui_icon(ICON_CHEST, DGX(dg.ch[i].cx * DG_C + DG_C / 2), DGY(dg.ch[i].cz * DG_C + DG_C / 2));
+        for (int pass = 0; pass < 2; pass++)
+            for (int i = 0; i < MAX_EN; i++) {
+                Enemy* e = &en[i]; if (!e->active || e->dead_t || (e->boss != 0) != (pass == 1)) continue;
+                int ecx = floordiv(e->x, DG_C), ecz = floordiv(e->z, DG_C);
+                if (ecx < 0 || ecz < 0 || ecx >= DG_W || ecz >= DG_H || !dgSeen[ecz][ecx]) continue;
+                ui_icon(e->boss ? ICON_BOSS : ICON_ENEMY, DGX(e->x), DGY(e->z));
+            }
+        #undef DGX
+        #undef DGY
+    } else {
+        for (int i = 0; i < nnearH; i++) ui_icon(ICON_HOUSE, cx + (((nearHx[i] - P.x) * 2) >> 12), cy + (((nearHz[i] - P.z) * 2) >> 12));
+        for (int i = 0; i < nnearF; i++) if (nearF[i].type == FEAT_DUNGEON)
+            ui_icon(ICON_DUNGEON, cx + (((((nearF[i].cx << 12) + 2048) - P.x) * 2) >> 12), cy + (((((nearF[i].cz << 12) + 2048) - P.z) * 2) >> 12));
+        for (int i = 0; i < MAX_EN; i++) { Enemy* e = &en[i]; if (e->active && !e->dead_t) ui_icon(e->boss ? ICON_BOSS : ICON_ENEMY, cx + (((e->x - P.x) * 2) >> 12), cy + (((e->z - P.z) * 2) >> 12)); }
+    }
+    ui_arrow(cx, cy);
+}
+
+static const char* compass(void);
+static void ui_draw_hud(void) {
+    memcpy(fb, ui_bg, 256 * 192);
+    char b[64];
+    // linha 1: titulo + nivel (+ FPS)
+    ui_text(UI_TEXT_X, UI_TEXT_Y[0], "Daggerfall DS", UI_INK, 6);
+    if (cfg.fps) snprintf(b, sizeof b, "FPS %d  Nv %d", fpsShown, P.level); else snprintf(b, sizeof b, "Nv %d", P.level);
+    ui_text(UI_TEXT_R - 6 * (int)strlen(b), UI_TEXT_Y[0], b, UI_INK, 6);
+    // linha 2: PV + barra
+    ui_text(UI_TEXT_X, UI_TEXT_Y[1], "PV", UI_INK, 6);
+    int bx = UI_TEXT_X + 16, by = UI_TEXT_Y[1] + 1, bw = 66;
+    ui_rect(bx - 1, by - 1, bx + bw, by + 5, UI_INK); ui_rect(bx, by, bx + bw - 1, by + 4, UI_REDD);
+    int fill = P.maxhp > 0 ? (P.hp * bw) / P.maxhp : 0; fill = clampi(fill, 0, bw);
+    if (fill > 0) ui_rect(bx, by, bx + fill - 1, by + 4, UI_RED);
+    snprintf(b, sizeof b, "%d/%d", P.hp, P.maxhp); ui_text(bx + bw + 5, UI_TEXT_Y[1], b, UI_INK, 6);
+    // linha 3: XP / ouro / pocoes
+    snprintf(b, sizeof b, "XP %d/%d Ouro %d Pocoes %d", P.xp, 40 * P.level, P.gold, P.potions); ui_text(UI_TEXT_X, UI_TEXT_Y[2], b, UI_INK, 6);
+    // linha 4: equipamento / direcao / abates
+    char dir[4]; strncpy(dir, compass(), 3); dir[3] = 0; for (int i = 2; i >= 0 && dir[i] == ' '; i--) dir[i] = 0;
+    snprintf(b, sizeof b, "%s  Dir %s  Abates %d", WNAME[P.weapon], dir, P.kills); ui_text(UI_TEXT_X, UI_TEXT_Y[3], b, UI_INK, 6);
+    // linha 5: botao de acao (ou mensagem curta)
+    const char* l5 = prompt[0] ? prompt : ((msgT > 0 && !strchr(msg, '\n')) ? msg : "");
+    if (texAlert) l5 = "ALERTA: tabela de texturas mudou";
+    ui_text(UI_TEXT_X, UI_TEXT_Y[4], l5, UI_INK, 6);
+    ui_radar();
+    if (msgT > 0 && strchr(msg, '\n')) {                  // dialogo: caixa sobre o mapa
+        char tmp[120]; strncpy(tmp, msg, 119); tmp[119] = 0; char* ls[4]; int n = 0; char* l = tmp;
+        while (l && n < 4) { ls[n++] = l; char* nl = strchr(l, '\n'); if (nl) { *nl = 0; l = nl + 1; } else l = 0; }
+        int bh = n * 8 + 6, y1 = UI_MAP_Y1 - 2, y0 = y1 - bh, x0 = UI_MAP_X0 + 4, x1 = UI_CMP_X0 - 4;
+        ui_rect(x0, y0, x1, y1, UI_INK); ui_rect(x0 + 1, y0 + 1, x1 - 1, y1 - 1, UI_BOX);
+        for (int i = 0; i < n; i++) ui_text(x0 + 5, y0 + 3 + i * 8, ls[i], UI_INK, 6);
+    }
+    uiMode = 1; uiDirty = 1;
+}
 static const char* compass(void) {
     int a = ((P.yaw & 0x7FFF) + 2048) >> 12;      // 0..7
     static const char* const N[8] = { "N ", "NE", "L ", "SE", "S ", "SO", "O ", "NO" };
     return N[a & 7];
 }
 
-static void hud_update(void) {
-    char b[48];
-    if (cfg.fps) snprintf(b, sizeof b, "DAGGERFALL DS  Nv %d  FPS %d", P.level, fpsShown); else snprintf(b, sizeof b, "DAGGERFALL DS     Nv %d", P.level);
-    put(0, b);
-    int bars = (P.hp * 12) / P.maxhp; if (bars < 0) bars = 0;
-    char bar[13]; for (int i = 0; i < 12; i++) bar[i] = i < bars ? '#' : '-'; bar[12] = 0;
-    snprintf(b, sizeof b, "PV [%s] %d/%d", bar, P.hp, P.maxhp); put(1, b);
-    snprintf(b, sizeof b, "XP %d/%d  Ouro %d  Pocoes %d", P.xp, 40 * P.level, P.gold, P.potions); put(2, b);
-    snprintf(b, sizeof b, "%s  Dir %s  Abates %d", WNAME[P.weapon], compass(), P.kills); put(3, b);
-    put(4, prompt[0] ? prompt : (inDungeon ? "Dungeon" : ((dayf > 2000) ? "Dia" : "Noite")));
-    int multi = (msgT > 0 && strchr(msg, '\n'));
-    if (!multi) put(5, msgT > 0 ? msg : "");
-    { static int mmc = 0; if ((mmc++ & 3) == 0) hud_minimap(); }
-    put(17, "~agua f mata V vila D dung e");
-    put(18, "A atacar  B correr  X arma");
-    put(19, "L/R lado  Y agir  SELECT pocao");
-    put(20, "START pausa  Tela: olhar");
-    if (texAlert) put(19, "ALERTA: tab. texturas mudou!");
-    if (multi) {   // mensagens multilinha (dialogos)
-        char tmp[120]; strncpy(tmp, msg, 119); tmp[119] = 0; char* l = tmp; int row = 21;
-        while (l && row < 24) { char* nl = strchr(l, '\n'); if (nl) *nl = 0; put(row++, l); l = nl ? nl + 1 : 0; }
-        put(5, "");
-    } else {
-        put(21, ""); put(22, "");
-        if (cfg.fps) { snprintf(b, sizeof b, "ms L%d D%d H%d  vert %d", profUpd / 33, profRnd / 33, profHud / 33, gVerts); put(23, b); }
-        else put(23, "");
-    }
-}
 
 // ------------------------------------------------------------------ cenas
 // ------------------------------------------------------------------ ceu (sol, lua, nuvens) - sincronizado com worldTime
@@ -1047,7 +1121,7 @@ static void new_game(void) {
     P.ground = world_height_at(P.x, P.z); P.y = P.ground + EYE; P.yaw = 0;
     inDungeon = 0; worldTime = DAY_LEN / 8; spawnTimer = 200; msgT = 0;
     gstate = ST_PLAY; paused = 0;
-    consoleClear();
+    ui_clear();
     say("Procure uma dungeon (D) !");
 }
 
@@ -1057,7 +1131,7 @@ static int inSettings = 0, settingsFromTitle = 0, setSel = 0;
 #define NSET 9
 static void title_draw_menu(void);
 static void pause_draw(void) {
-    consoleClear();
+    ui_clear();
     put(8, "       -- PAUSA --"); put(10, "START: continuar"); put(12, "A: configuracoes"); put(14, "SELECT: voltar ao titulo");
 }
 static void settings_draw(void) {
@@ -1087,7 +1161,7 @@ static void settings_change(int i, int act) {            // act: -1 esquerda, +1
     }
 }
 static void settings_exit(void) {
-    inSettings = 0; consoleClear();
+    inSettings = 0; ui_clear();
     if (settingsFromTitle) title_draw_menu(); else pause_draw();
 }
 static void settings_update(void) {
@@ -1135,7 +1209,7 @@ static void title_draw_menu(void) {
 
 static void title_update(void) {
     int down = keysDown();
-    if (helpPage) { if (down & (KEY_A | KEY_B | KEY_TOUCH)) { helpPage = 0; consoleClear(); title_draw_menu(); } return; }
+    if (helpPage) { if (down & (KEY_A | KEY_B | KEY_TOUCH)) { helpPage = 0; ui_clear(); title_draw_menu(); } return; }
     if (down & KEY_UP)   menuSel = (menuSel + 3) % 4;
     if (down & KEY_DOWN) menuSel = (menuSel + 1) % 4;
     int pick = -1;
@@ -1146,9 +1220,9 @@ static void title_update(void) {
     }
     if (down & (KEY_UP | KEY_DOWN | KEY_TOUCH)) title_draw_menu();
     if (pick == 0) new_game();
-    else if (pick == 1) { inSettings = 1; settingsFromTitle = 1; setSel = 0; consoleClear(); settings_draw(); }
-    else if (pick == 2) { helpPage = 1; consoleClear(); title_draw_menu(); }
-    else if (pick == 3) { helpPage = 2; consoleClear(); title_draw_menu(); }
+    else if (pick == 1) { inSettings = 1; settingsFromTitle = 1; setSel = 0; ui_clear(); settings_draw(); }
+    else if (pick == 2) { helpPage = 1; ui_clear(); title_draw_menu(); }
+    else if (pick == 3) { helpPage = 2; ui_clear(); title_draw_menu(); }
 }
 
 static void title_render(void) {
@@ -1170,7 +1244,15 @@ static void title_render(void) {
 // gancho usado apenas pelo teste no PC (tools/host_test.sh): teleporta p/ uma dungeon e volta
 static double hk_t0 = 0;
 static double hk_now(void) { return (double)clock() * 1e6 / CLOCKS_PER_SEC; }
+static void host_dump_fb(int n) {
+    char nm[64]; snprintf(nm, sizeof nm, "/tmp/fb_%d.ppm", n); FILE* f = fopen(nm, "wb"); if (!f) return;
+    fprintf(f, "P6\n256 192\n255\n");
+    for (int i = 0; i < 256 * 192; i++) { u16 c = ui_palette[fb[i]]; unsigned char rgb[3] = { (unsigned char)((c & 31) << 3), (unsigned char)(((c >> 5) & 31) << 3), (unsigned char)(((c >> 10) & 31) << 3) }; fwrite(rgb, 1, 3, f); }
+    fclose(f);
+}
 static void host_test_hook(void) {
+    if (frameNo == 349) say("Bem-vindo, viajante!\nCuidado com os goblins\nao anoitecer.");
+    if (frameNo == 350 || frameNo == 900 || frameNo == 421 || frameNo == 1700 || frameNo == 2300) host_dump_fb(frameNo);
     { extern unsigned long g_noise_calls; static unsigned long last; if (frameNo <= 8 || frameNo % 500 == 0) printf("  [f=%d] noise2/frame=%lu\n", frameNo, g_noise_calls - last); last = g_noise_calls; }
     if (frameNo % 1000 == 0) printf("  clamps(v16)=%d nvis=%d\n", g_clamps, nvis);
     if (frameNo % 500 == 0) { int na = 0; for (int i = 0; i < MAX_EN; i++) na += en[i].active; printf("f=%d state=%d dg=%d pos=(%.1f,%.1f) h=%.2f hp=%d lv=%d kills=%d gold=%d enemies=%d day=%d\n", frameNo, gstate, inDungeon, P.x / 4096.0, P.z / 4096.0, P.ground / 4096.0, P.hp, P.level, P.kills, P.gold, na, dayf); }
@@ -1201,12 +1283,8 @@ int main(void) {
     MY_POWCNT |= 0x820F;            // LCD, 2D A, 3D render+geometria, 2D B, engine A na tela de cima
 #endif
     videoSetMode(MODE_0_3D);
-    videoSetModeSub(MODE_0_2D);
     vramSetBankA(VRAM_A_TEXTURE); vramSetBankB(VRAM_B_TEXTURE); vramSetBankC(VRAM_C_TEXTURE); vramSetBankD(VRAM_D_TEXTURE);
-    vramSetBankH(VRAM_H_SUB_BG);
-    consoleInit(NULL, 0, BgType_Text4bpp, BgSize_T_256x256, 15, 0, false, true);
-    BG_PALETTE_SUB[0] = RGB15(2, 3, 8);
-    BG_PALETTE_SUB[255] = RGB15(31, 31, 28);
+    ui_init();
 #ifdef HAVE_EXC_HANDLER
     defaultExceptionHandler();      // em caso de crash mostra uma tela com o erro
 #endif
@@ -1224,6 +1302,7 @@ int main(void) {
         put(3, "ERRO: gfx_data.c e gfx_data.h");
         put(4, "nao combinam! Suba os DOIS");
         put(5, "arquivos da mesma versao.");
+        ui_flush();
         while (1) wait_vbl();
     }
     load_textures();
@@ -1231,8 +1310,9 @@ int main(void) {
     { char tb[40]; if (texFailed) snprintf(tb, sizeof tb, "3/4 texturas: %d FALHARAM (1a=%d)", texFailed, texFirstFail); else snprintf(tb, sizeof tb, "3/4 texturas ok (%d)", TEX_COUNT); put(3, tb); }
     world_init(SEED);
     put(4, "4/4 mundo ok");
+    ui_flush();
     for (int i = 0; i < (texFailed ? 240 : 20); i++) wait_vbl();    // mostra as etapas por um instante
-    consoleClear();
+    ui_clear();
     rngs ^= (unsigned)(SEED * 7919u);
 
     fps_init();
@@ -1260,10 +1340,10 @@ int main(void) {
         case ST_PLAY:
             if (inSettings) { settings_update(); }
             else {
-            if (keysDown() & KEY_START) { paused ^= 1; if (paused) pause_draw(); else consoleClear(); }
+            if (keysDown() & KEY_START) { paused ^= 1; if (paused) pause_draw(); else ui_clear(); }
             if (paused) {
-                if (keysDown() & KEY_A) { inSettings = 1; settingsFromTitle = 0; setSel = 0; consoleClear(); settings_draw(); }
-                else if (keysDown() & KEY_SELECT) { gstate = ST_TITLE; paused = 0; inDungeon = 0; consoleClear(); title_draw_menu(); }
+                if (keysDown() & KEY_A) { inSettings = 1; settingsFromTitle = 0; setSel = 0; ui_clear(); settings_draw(); }
+                else if (keysDown() & KEY_SELECT) { gstate = ST_TITLE; paused = 0; inDungeon = 0; ui_clear(); title_draw_menu(); }
             } else {
                 u16 pt0 = prof_now();
                 worldTime = (worldTime + 1) % DAY_LEN;
@@ -1272,12 +1352,12 @@ int main(void) {
                 update_player();
                 if (gstate == ST_PLAY) { update_enemies(); update_spawns(); }
                 profUpd = (u16)(prof_now() - pt0);
-                if (++hudTick >= 6) { hudTick = 0; if (gstate == ST_PLAY) { u16 ph = prof_now(); hud_update(); profHud = (u16)(prof_now() - ph); } }
+                if (++hudTick >= 4 || hudForce) { hudTick = 0; hudForce = 0; if (gstate == ST_PLAY) { u16 ph = prof_now(); ui_draw_hud(); profHud = (u16)(prof_now() - ph); } }
             }
             }
             update_daylight();
             { u16 pr = prof_now(); render_scene(); draw_weapon(); profRnd = (u16)(prof_now() - pr); }
-            if (gstate == ST_DEAD) { consoleClear(); put(8, "      VOCE MORREU"); put(10, "  Pressione A para renascer"); }
+            if (gstate == ST_DEAD) { ui_clear(); put(8, "      VOCE MORREU"); put(10, "  Pressione A para renascer"); }
             break;
         case ST_DEAD:
             if (keysDown() & KEY_A) {
@@ -1289,6 +1369,7 @@ int main(void) {
             break;
         }
         glFlush(0);
+        ui_flush();
         fps_tick();
         wait_vbl();
     }
