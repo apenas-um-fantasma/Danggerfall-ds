@@ -20,6 +20,7 @@
 #include "dungeon.h"
 #include "gfx_data.h"
 #include "ui_data.h"
+#include "menu_data.h"
 #ifdef HOST_TEST
 #include <time.h>
 #endif
@@ -910,6 +911,11 @@ static void ui_init(void) {
     for (int i = 0; i < 256; i++) BG_PALETTE_SUB[i] = ui_palette[i];
     memset(fb, UI_BG, 256 * 192); uiDirty = 1;
 }
+static int palMenu = 0;
+static void ui_pal(int menu) {                            // 0 = paleta do HUD, 1 = paleta do menu (so os indices 0..239 mudam)
+    if (menu == palMenu) return; palMenu = menu;
+    for (int i = 0; i < 240; i++) BG_PALETTE_SUB[i] = menu ? menu_palette[i] : ui_palette[i];
+}
 static void ui_flush(void) {                              // a VRAM so aceita escritas de 16/32 bits
     if (!subVram || !uiDirty) return;
     for (int i = 0; i < 256 * 96; i++) subVram[i] = fb16[i];
@@ -998,6 +1004,7 @@ static void ui_radar(void) {
 
 static const char* compass(void);
 static void ui_draw_hud(void) {
+    ui_pal(0);
     memcpy(fb, ui_bg, 256 * 192);
     char b[64];
     // linha 1: titulo + nivel (+ FPS)
@@ -1181,18 +1188,37 @@ static void settings_update(void) {
 }
 
 // ------------------------------------------------------------------ titulo
+static void menu_label(const char* s, int cy, int sel) {  // texto centrado na faixa; aceita UTF-8 so p/ C-cedilha e O-til
+    int n = 0; for (const char* q = s; *q; q++) if (((unsigned char)*q & 0xC0) != 0x80) n++;
+    int x0 = (MENU_SLOT_X0 + MENU_SLOT_X1) / 2 - (n * 7 - 1) / 2, y = cy - 3;
+    for (int pass = sel ? 0 : 1; pass < 2; pass++) {      // sel: sombra escura (+1,+1) e texto claro por cima
+        int col = (pass == 0) ? UI_INK : (sel ? UI_WHITE : UI_INK), o = (pass == 0) ? 1 : 0, x = x0 + o;
+        for (const char* q = s; *q; q++, x += 7) {
+            int c = (unsigned char)*q, acc = 0;
+            if (c == 0xC3) { q++; acc = (unsigned char)*q; c = (acc == 0x87) ? 'C' : 'O'; }
+            ui_char(x, y + o, c, col);
+            if (acc == 0x87) { ui_rect(x + 3, y + o + 7, x + 3, y + o + 7, col); ui_rect(x + 2, y + o + 8, x + 2, y + o + 8, col); }
+            if (acc == 0x95) { ui_rect(x + 1, y + o - 2, x + 2, y + o - 2, col); ui_rect(x, y + o - 1, x, y + o - 1, col); ui_rect(x + 3, y + o - 1, x + 3, y + o - 1, col); }
+        }
+    }
+}
 static void title_draw_menu(void) {
+    if (helpPage == 0) {
+        static const char* const L[4] = { "NOVO JOGO", "CONFIGURA" "\xC3\x87" "\xC3\x95" "ES", "COMO JOGAR", "SOBRE" };
+        ui_pal(1);
+        memcpy(fb, menu_bg, 256 * 192);
+        for (int i = 0; i < 4; i++) menu_label(L[i], MENU_SLOT_CY[i], i == menuSel);
+        int ay = MENU_SLOT_CY[menuSel] + MENU_ARROW_DY - MENU_ARROW_H / 2;
+        for (int y = 0; y < MENU_ARROW_H; y++) for (int x = 0; x < MENU_ARROW_W; x++) {
+            int p = menu_arrow[y * MENU_ARROW_W + x]; if (p != 255) fb[(ay + y) * 256 + MENU_ARROW_X + x] = (u8)p;
+        }
+        uiMode = 0; uiDirty = 1;
+        return;
+    }
     put(1, "");
     put(3, "   D A G G E R F A L L   D S");
     put(4, "     (teste tecnico - NDS)");
-    if (helpPage == 0) {
-        put(8,  menuSel == 0 ? "      > NOVO JOGO" : "        NOVO JOGO");
-        put(10, menuSel == 1 ? "      > CONFIGURACOES" : "        CONFIGURACOES");
-        put(12, menuSel == 2 ? "      > COMO JOGAR" : "        COMO JOGAR");
-        put(14, menuSel == 3 ? "      > SOBRE" : "        SOBRE");
-        put(18, "  Cima/Baixo + A, ou toque");
-        for (int r = 19; r < 24; r++) put(r, "");
-    } else if (helpPage == 1) {
+    if (helpPage == 1) {
         put(6, "Cima/Baixo  andar");  put(7, "Esq/Dir     girar");   put(8, "L / R       andar de lado");
         put(9, "B           correr");  put(10, "A           atacar");  put(11, "X           espada/punhos");
         put(12, "Y           falar/abrir/entrar"); put(13, "SELECT      beber pocao"); put(14, "START       pausa");
@@ -1215,8 +1241,9 @@ static void title_update(void) {
     int pick = -1;
     if (down & KEY_A) pick = menuSel;
     if (down & KEY_TOUCH) {
-        touchPosition t; touchRead(&t); int row = t.py / 8;
-        if (row >= 8 && row <= 15) { pick = (row - 8) / 2; menuSel = pick; }
+        touchPosition t; touchRead(&t);
+        if (t.px >= MENU_ARROW_X && t.px <= MENU_SLOT_X1)
+            for (int i = 0; i < 4; i++) if (t.py >= MENU_SLOT_CY[i] - 8 && t.py <= MENU_SLOT_CY[i] + 8) { pick = i; menuSel = i; break; }
     }
     if (down & (KEY_UP | KEY_DOWN | KEY_TOUCH)) title_draw_menu();
     if (pick == 0) new_game();
