@@ -22,6 +22,7 @@
 #include "ui_data.h"
 #include "menu_data.h"
 #include "cloud_data.h"
+#include "sword_data.h"
 #ifdef HOST_TEST
 #include <time.h>
 #endif
@@ -134,6 +135,7 @@ static void say(const char* s) { strncpy(msg, s, 119); msg[119] = 0; msgT = 220;
 
 // ------------------------------------------------------------------ texturas
 static int texId[TEX_COUNT];
+static int swordTex[SWORD_N];                          // espadas em 1a pessoa (sword_data.c)
 static int cloudTex[CLOUD_N];                          // nuvens (cloud_data.c), 64x32 cada
 static int tsz(int n) { int s = 0, v = 8; while (v < n) { v <<= 1; s++; } return s; }
 static unsigned tex_crc(void) {                       // muda se a tabela de texturas for sobrescrita na RAM
@@ -145,12 +147,18 @@ static unsigned texCrc0 = 0; static int texAlert = 0;
 static int texFailed = 0, texFirstFail = -1;
 static void load_textures(void) {
     for (int i = 0; i < TEX_COUNT; i++) {
+        if ((i >= TEX_SWORD0 && i <= TEX_SWORD3) || (i >= TEX_CLOUD0 && i <= TEX_CLOUD2)) continue;   // substituidas (sword_data / cloud_data): poupa VRAM
         const TexDef* t = &gTexDefs[i];
         glGenTextures(1, &texId[i]);
         glBindTexture(0, texId[i]);
         int ok = glTexImage2D(0, 0, GL_RGBA, tsz(t->w), tsz(t->h), 0,
                               TEXGEN_TEXCOORD | (t->wrap ? (GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T) : 0), t->data);
         if (!ok) { texFailed++; if (texFirstFail < 0) texFirstFail = i; }
+    }
+    for (int i = 0; i < SWORD_N; i++) {
+        glGenTextures(1, &swordTex[i]);
+        glBindTexture(0, swordTex[i]);
+        if (!glTexImage2D(0, 0, GL_RGBA, tsz(sword_def[i].w), tsz(sword_def[i].h), 0, TEXGEN_TEXCOORD, sword_def[i].data)) { texFailed++; if (texFirstFail < 0) texFirstFail = TEX_COUNT + CLOUD_N + i; }
     }
     for (int i = 0; i < CLOUD_N; i++) {
         glGenTextures(1, &cloudTex[i]);
@@ -631,11 +639,10 @@ static void draw_torch_overlay(void) {                 // tocha em 1a pessoa: in
     }
     glEnd();
 }
-static void draw_overlay_quad(int tex, int x0, int y0, int x1, int y1, int alpha, unsigned short col, int pid) {
+static void draw_overlay_quad_t(int texid, int tw, int th, int x0, int y0, int x1, int y1, int alpha, unsigned short col, int pid) {   // tw x th = trecho da textura usado
     gVerts += 4;
-    int tw = tex >= 0 ? gTexDefs[tex].w : 0, th = tex >= 0 ? gTexDefs[tex].h : 0;
     glPolyFmt(POLY_ALPHA(alpha) | POLY_CULL_NONE | POLY_ID(pid));
-    if (tex >= 0) glBindTexture(0, texId[tex]); else glBindTexture(0, 0);
+    if (texid >= 0) glBindTexture(0, texid); else glBindTexture(0, 0);
     glColor(col);
     glBegin(GL_QUADS);
     TC(0, th);  glVertex3v16(x0, y0, 4000);
@@ -643,6 +650,10 @@ static void draw_overlay_quad(int tex, int x0, int y0, int x1, int y1, int alpha
     TC(tw, 0);  glVertex3v16(x1, y1, 4000);
     TC(0, 0);   glVertex3v16(x0, y1, 4000);
     glEnd();
+}
+static void draw_overlay_quad(int tex, int x0, int y0, int x1, int y1, int alpha, unsigned short col, int pid) {
+    if (tex >= 0) draw_overlay_quad_t(texId[tex], gTexDefs[tex].w, gTexDefs[tex].h, x0, y0, x1, y1, alpha, col, pid);
+    else draw_overlay_quad_t(-1, 0, 0, x0, y0, x1, y1, alpha, col, pid);
 }
 static void begin_overlay(void) {
     glMatrixMode(GL_PROJECTION); glLoadIdentity(); glOrtho(-8, 8, -6, 6, -1, 1);
@@ -664,7 +675,12 @@ static void draw_weapon(void) {
     int hurt = P.hurt_t > 0;
     int x0 = -2048 + bobx * 40, y0 = -24576 + boby * 40 - 180;        // canto inferior esquerdo (v16)
     int sz = 8 * 4096;                                                 // 128 px
-    draw_overlay_quad(tex, x0, y0, x0 + sz, y0 + sz, 31, hurt ? RGB15(31, 16, 16) : litc(250), 10);
+    unsigned short wcol = hurt ? RGB15(31, 16, 16) : litc(250);
+    if (P.weapon) {                                                    // espada nova: posicao pre-calculada (a mao fica sempre no mesmo ponto)
+        const SwordDef* sd = &sword_def[mini(idx, 3)];
+        int bx = bobx * 40, by = boby * 40 - 180;
+        draw_overlay_quad_t(swordTex[mini(idx, 3)], sd->cw, sd->ch, sd->x0 + bx, sd->y1 + by, sd->x1 + bx, sd->y0 + by, 31, wcol, 10);
+    } else draw_overlay_quad(tex, x0, y0, x0 + sz, y0 + sz, 31, wcol, 10);
     if (hurt) draw_overlay_quad(-1, -32000, -24500, 32000, 24500, 9, RGB15(31, 0, 0), 11);
 }
 static void draw_logo(void) {
