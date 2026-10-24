@@ -21,6 +21,7 @@
 #include "gfx_data.h"
 #include "ui_data.h"
 #include "menu_data.h"
+#include "cloud_data.h"
 #ifdef HOST_TEST
 #include <time.h>
 #endif
@@ -133,6 +134,7 @@ static void say(const char* s) { strncpy(msg, s, 119); msg[119] = 0; msgT = 220;
 
 // ------------------------------------------------------------------ texturas
 static int texId[TEX_COUNT];
+static int cloudTex[CLOUD_N];                          // nuvens (cloud_data.c), 64x32 cada
 static int tsz(int n) { int s = 0, v = 8; while (v < n) { v <<= 1; s++; } return s; }
 static unsigned tex_crc(void) {                       // muda se a tabela de texturas for sobrescrita na RAM
     unsigned c = 0;
@@ -149,6 +151,11 @@ static void load_textures(void) {
         int ok = glTexImage2D(0, 0, GL_RGBA, tsz(t->w), tsz(t->h), 0,
                               TEXGEN_TEXCOORD | (t->wrap ? (GL_TEXTURE_WRAP_S | GL_TEXTURE_WRAP_T) : 0), t->data);
         if (!ok) { texFailed++; if (texFirstFail < 0) texFirstFail = i; }
+    }
+    for (int i = 0; i < CLOUD_N; i++) {
+        glGenTextures(1, &cloudTex[i]);
+        glBindTexture(0, cloudTex[i]);
+        if (!glTexImage2D(0, 0, GL_RGBA, tsz(CLOUD_W), tsz(CLOUD_H), 0, TEXGEN_TEXCOORD, cloud_tex[i])) { texFailed++; if (texFirstFail < 0) texFirstFail = TEX_COUNT + i; }
     }
 }
 #define TC(u, v) glTexCoord2t16(inttot16(u), inttot16(v))
@@ -1050,7 +1057,7 @@ static short sclamp(int v) { return (short)(v > 32767 ? 32767 : (v < -32767 ? -3
 static inline void vtxs(int x, int y, int z) { glVertex3v16(sclamp(x >> 3), sclamp(y >> 3), sclamp(z >> 3)); }
 
 // quad voltado para a camera, na direcao d (vetor unitario 4.12) a distancia D; vertices relativos a camera (ceu = no infinito)
-static void sky_quad(int tex, int dx, int dy, int dz, int D, int hw, int hh, int alpha, unsigned short col, int pid) {
+static void sky_quad_t(int texid, int tw, int th, int flip, int dx, int dy, int dz, int D, int hw, int hh, int alpha, unsigned short col, int pid) {
     int hyp = isqrt((unsigned)(dx * dx + dz * dz)), rx, rz;
     if (hyp < 300) { rx = gRX; rz = gRZ; } else { rx = (-dz * 4096) / hyp; rz = (dx * 4096) / hyp; }
     int ux = (-rz * dy) >> 12, uy = (rz * dx - rx * dz) >> 12, uz = (rx * dy) >> 12;      // u = r x d
@@ -1058,16 +1065,20 @@ static void sky_quad(int tex, int dx, int dy, int dz, int D, int hw, int hh, int
     int rwx = (rx * hw) >> 12, rwz = (rz * hw) >> 12;
     int uhx = (ux * hh) >> 12, uhy = (uy * hh) >> 12, uhz = (uz * hh) >> 12;
     gVerts += 4;
-    int tw = gTexDefs[tex].w, th = gTexDefs[tex].h;
     glPolyFmt(POLY_ALPHA(alpha) | POLY_CULL_NONE | POLY_ID(pid));
-    glBindTexture(0, texId[tex]);
+    glBindTexture(0, texid);
     glColor(col);
     glBegin(GL_QUADS);
-    TC(0, th);  vtxs(cx - rwx - uhx, cy - uhy, cz - rwz - uhz);
-    TC(tw, th); vtxs(cx + rwx - uhx, cy - uhy, cz + rwz - uhz);
-    TC(tw, 0);  vtxs(cx + rwx + uhx, cy + uhy, cz + rwz + uhz);
-    TC(0, 0);   vtxs(cx - rwx + uhx, cy + uhy, cz - rwz + uhz);
+    int u0 = flip ? tw : 0, u1 = flip ? 0 : tw;
+    TC(u0, th); vtxs(cx - rwx - uhx, cy - uhy, cz - rwz - uhz);
+    TC(u1, th); vtxs(cx + rwx - uhx, cy - uhy, cz + rwz - uhz);
+    TC(u1, 0);  vtxs(cx + rwx + uhx, cy + uhy, cz + rwz + uhz);
+    TC(u0, 0);  vtxs(cx - rwx + uhx, cy + uhy, cz - rwz + uhz);
     glEnd();
+}
+
+static void sky_quad(int tex, int dx, int dy, int dz, int D, int hw, int hh, int alpha, unsigned short col, int pid) {
+    sky_quad_t(texId[tex], gTexDefs[tex].w, gTexDefs[tex].h, 0, dx, dy, dz, D, hw, hh, alpha, col, pid);
 }
 
 static void draw_sky(void) {
@@ -1083,23 +1094,28 @@ static void draw_sky(void) {
     if (cfg.sky && sdy > -250) sky_quad(TEX_SUN, sdx, sdy, sdz, D, (D * 300) >> 12, (D * 300) >> 12, 31, RGB15(31, 31, 31), 7);
     if (cfg.sky && -sdy > -250) sky_quad(TEX_MOON, -sdx, -sdy, -sdz, D, (D * 240) >> 12, (D * 240) >> 12, 31, RGB15(31, 31, 31), 8);
     if (cfg.clouds) {
-        static int init = 0, caz[18], cel[18], csz[18];
+        enum { NC = 16 };                                            // 12 nuvens diferentes + 4 repetidas espelhadas
+        static int init = 0, caz[NC], cel[NC], csz[NC], cspd[NC];
         if (!init) {
-            for (int i = 0; i < 18; i++) {
+            static const short band[3] = { 1300, 2600, 4300 };        // baixa (~14 graus), media (~29), alta (~47)
+            for (int i = 0; i < NC; i++) {
                 unsigned h = hash3(i, 77, 5);
-                caz[i] = (int)(h & 0x7FFF); int r = (int)((h >> 15) % 100);
-                cel[i] = 900 + (r * r * 5500) / 10000;               // mais nuvens perto do horizonte
-                csz[i] = 650 + (int)((h >> 22) % 350);
+                caz[i] = (i * 32768 / NC + (int)(h & 1023) - 512) & 0x7FFF;      // espalhadas em volta, sem juntar
+                cel[i] = band[i % 3] + (int)((h >> 10) % 900) - 450;             // vizinhas em alturas diferentes
+                csz[i] = 850 + (int)((h >> 20) % 350);
+                cspd[i] = 190 + (int)((h >> 4) % 140);                           // cada uma com sua velocidade
             }
             init = 1;
         }
         unsigned short col = RGB15(mini(31, (31 * ambR) >> 8), mini(31, (31 * ambG) >> 8), mini(31, (31 * ambB) >> 8));
-        int drift = frameNo >> 2;                                    // vento lento
-        for (int i = 0; i < 18; i++) {
-            int az = (caz[i] + drift) & 0x7FFF, ce = cosLerp(cel[i]);
+        for (int i = 0; i < NC; i++) {
+            int az = (caz[i] + ((frameNo * cspd[i]) >> 10)) & 0x7FFF, ce = cosLerp(cel[i]);
             int dx = (sinLerp(az) * ce) >> 12, dz = -((cosLerp(az) * ce) >> 12), dy = sinLerp(cel[i]);
-            int hw = (D * csz[i]) >> 12;
-            sky_quad(TEX_CLOUD0 + (i % 3), dx, dy, dz, D, hw, hw >> 1, 22, col, 9);
+            int s = dy;                                                          // 0 = horizonte, 4096 = zenite
+            int hw = (((D * csz[i]) >> 12) * (2300 + ((s * 1800) >> 12))) >> 12;   // perspectiva: menores perto do horizonte
+            int hh = ((hw >> 1) * (2048 + ((s * 2048) >> 12))) >> 12;              // e mais achatadas
+            int alpha = 18 + ((s * 10) >> 12);                                   // somem de leve no horizonte
+            sky_quad_t(cloudTex[(i * 5) % CLOUD_N], CLOUD_W, CLOUD_H, i >= CLOUD_N, dx, dy, dz, D, hw, hh, alpha, col, 9);
         }
     }
     set_modelview();                                                // restaura a matriz do mundo
