@@ -904,7 +904,7 @@ static u16 host_vram[256 * 96];
 
 static void ui_init(void) {
     videoSetModeSub(MODE_5_2D | DISPLAY_BG3_ACTIVE);
-    vramSetBankH(VRAM_H_SUB_BG); vramSetBankI(VRAM_I_SUB_BG);          // 32 KB + 16 KB contiguos = 256x192 em 8 bits
+    vramSetBankH(VRAM_H_SUB_BG); vramSetBankI(VRAM_I_SUB_BG_0x06208000);          // 32 KB + 16 KB contiguos = 256x192 em 8 bits
     int bg = bgInitSub(3, BgType_Bmp8, BgSize_B8_256x256, 0, 0);
     subVram = (u16*)bgGetGfxPtr(bg);
     for (int i = 0; i < 256; i++) BG_PALETTE_SUB[i] = ui_palette[i];
